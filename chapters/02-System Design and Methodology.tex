@@ -1,0 +1,1118 @@
+\chapter{System Design and Methodology}
+
+\section{Introduction}
+%TODO%
+
+\section{High-Level System Architecture}
+\label{sec:architecture}
+% ------------------------------------------------------------
+ 
+The proposed system is designed as a distributed robotic architecture
+structured across three main layers: the \emph{embedded device layer}
+(Raspberry Pi and Arduino), the \emph{server layer}, and the
+\emph{user interface layer} (web dashboard). Together these layers
+form a real-time, event-driven pipeline that integrates perception,
+communication, and physical actuation into a cohesive autonomous
+system.
+ 
+\bigskip
+\noindent\textbf{[DIAGRAM 1 — System Architecture Overview]}\\
+\textit{A three-tier block diagram showing the Embedded Layer
+(Raspberry Pi + Arduino), the Server Layer (backend + inference
+engine), and the UI Layer (dashboard), with labelled arrows indicating
+WebSocket and serial communication channels between them. Place after
+this paragraph.}
+\bigskip
+ 
+% ............................................................
+\subsection{System Startup and Initialisation}
+% ............................................................
+ 
+On power-up, the Raspberry Pi executes an initialisation sequence
+before entering normal operation. This sequence serves two purposes:
+it verifies that the network environment is reachable, and it
+authenticates any remote client wishing to interact with the
+system~\cite{heath2002embedded}.
+ 
+The initialisation procedure follows these steps:
+ 
+\begin{enumerate}
+    \item \textbf{Network check.} The system tests for an active
+          network connection. If none is available, it cannot
+          establish the server link required for remote monitoring
+          and fallback inference.
+ 
+    \item \textbf{Credential verification.} Authentication credentials
+          for remote access are validated. If credentials do not
+          match, the system enters a \emph{protected provisioning
+          mode}: it suspends external control and waits for a
+          successful authenticated handshake before proceeding.
+\end{enumerate}
+ 
+This two-step gate ensures that the system remains inoperable to
+unauthorised parties even if the hardware is physically accessible.
+ 
+% ............................................................
+\subsection{Communication Initialisation}
+% ............................................................
+ 
+Once the initialisation guard passes, two independent communication
+channels are brought up concurrently:
+ 
+\begin{itemize}
+    \item \textbf{WebSocket connection} between the Raspberry Pi and
+          the backend server. WebSockets provide a persistent,
+          full-duplex TCP channel that allows either side to push
+          messages without polling~\cite{fette2011websocket}. This
+          channel carries high-level control commands, video frame
+          streams, and telemetry data.
+ 
+    \item \textbf{Serial (UART) connection} between the Raspberry Pi
+          and the Arduino microcontroller. Serial communication
+          provides deterministic, low-latency delivery of binary
+          command packets to hardware peripherals — suitable for
+          real-time actuator control where the overhead of a
+          network stack would be unnecessary~\cite{axelson2007serial}.
+\end{itemize}
+ 
+The two channels are kept deliberately separate: the WebSocket handles
+supervisory and data-plane traffic while the serial link handles
+time-critical hardware commands. This separation prevents high-level
+communication delays from affecting actuator response times.
+ 
+\bigskip
+\noindent\textbf{[DIAGRAM 2 — Communication Channels]}\\
+\textit{A sequence or swim-lane diagram showing the Raspberry Pi in
+the centre, with WebSocket traffic flowing left to the server and
+serial traffic flowing right to the Arduino. Include example message
+types on each arrow (e.g., ``frame stream'', ``pump ON''). Place
+after this subsection.}
+\bigskip
+ 
+% ............................................................
+\subsection{Multi-Threaded Execution Architecture}
+% ............................................................
+ 
+After initialisation, the Raspberry Pi enters its main execution
+phase. To prevent any single task from blocking the others, the
+system adopts a \emph{multi-threaded} design in which four concurrent
+threads run in parallel:
+ 
+\begin{enumerate}
+    \item \textbf{Camera capture thread.} Continuously acquires frames
+          from the camera module at the configured frame rate and
+          places them in a shared buffer for the inference thread to
+          consume.
+ 
+    \item \textbf{AI inference thread.} Dequeues frames from the
+          buffer and runs the detection pipeline (see
+          Section~\ref{sec:inference_pipeline}). Publishes detection
+          events to a shared event queue.
+ 
+    \item \textbf{Communication thread.} Manages the WebSocket
+          connection (sending frames, receiving commands) and the
+          Arduino serial link (forwarding actuation commands).
+ 
+    \item \textbf{State machine thread.} Reads the event queue and
+          advances the Finite State Machine (FSM) described in
+          Section~\ref{sec:fsm}, translating system state transitions
+          into concrete actions.
+\end{enumerate}
+ 
+Thread-safe queues and mutexes mediate access to shared resources,
+ensuring that frame buffers and event queues are read and written
+without race conditions~\cite{silberschatz2018os}.
+ 
+\bigskip
+\noindent\textbf{[DIAGRAM 3 — Thread Architecture]}\\
+\textit{A concurrent thread diagram (four horizontal swim lanes)
+showing the Camera, Inference, Communication, and FSM threads,
+with shared data structures (frame buffer, event queue) indicated
+as boxes between the relevant lanes. Place after this subsection.}
+\bigskip
+ 
+% ............................................................
+\subsection{Perception and Inference Pipeline}
+\label{sec:inference_pipeline}
+% ............................................................
+ 
+The core perception task — detecting pests or target objects in the
+camera feed — is implemented as a two-mode inference pipeline with an
+automatic fallback mechanism:
+ 
+\begin{enumerate}
+    \item \textbf{Local inference (primary mode).} If a compatible
+          optimised model (e.g., a quantised TFLite or ONNX file) is
+          present on the Raspberry Pi, inference is performed
+          on-device. This is the preferred path: it minimises latency,
+          avoids network dependency, and keeps the detection loop
+          self-contained.
+ 
+    \item \textbf{Remote inference (fallback mode).} If no local model
+          is available or the device lacks sufficient resources,
+          captured frames are streamed to the backend server over
+          the WebSocket channel. The server performs inference and
+          returns detection results to the Pi.
+\end{enumerate}
+ 
+This dual-mode design improves system robustness: the robot continues
+to function even under degraded computational conditions, and the
+same codebase supports both embedded and server-side execution without
+modification.
+ 
+\bigskip
+\noindent\textbf{[DIAGRAM 4 — Inference Pipeline Flowchart]}\\
+\textit{A flowchart beginning at ``New Frame Captured'', branching on
+``Local model available?'' — Yes path leads to on-device inference;
+No path leads to WebSocket transmission and server inference. Both
+paths converge at ``Detection Result Available''. Place after this
+subsection.}
+\bigskip
+ 
+% ............................................................
+\subsection{Event-Driven Actuation}
+% ............................................................
+ 
+When the inference pipeline produces a positive detection, the system
+responds through an event-driven actuation chain that cleanly
+separates the perception and control concerns:
+ 
+\begin{enumerate}
+    \item \textbf{Detection event raised.} The inference thread pushes
+          a detection event (object class, bounding box, confidence
+          score) onto the shared event queue.
+ 
+    \item \textbf{Control signal generated.} The FSM consumes the
+          event, transitions to the \emph{Actuation} state, and
+          generates the appropriate command (e.g., activate pump).
+ 
+    \item \textbf{Command forwarded to Arduino.} The communication
+          thread serialises the command and transmits it over the
+          UART link to the Arduino.
+ 
+    \item \textbf{Physical actuation.} The Arduino executes the
+          command by driving the relevant peripheral — for example,
+          triggering a relay to activate the pesticide pump.
+\end{enumerate}
+ 
+Decoupling perception from actuation in this way means that the
+detection logic can be modified or replaced independently of the
+hardware control logic, improving modularity and simplifying
+testing~\cite{brooks1991intelligence}.
+ 
+\bigskip
+\noindent\textbf{[DIAGRAM 5 — Actuation Event Chain]}\\
+\textit{A linear pipeline diagram: Inference Thread
+$\rightarrow$ Event Queue $\rightarrow$ FSM $\rightarrow$
+Communication Thread $\rightarrow$ Arduino $\rightarrow$ Pump/Actuator.
+Label each arrow with the data passed (event struct, UART command
+bytes, relay signal). Place after this subsection.}
+\bigskip
+ 
+% ............................................................
+\subsection{Server-Side Architecture}
+% ............................................................
+ 
+The backend server functions as both a \emph{computational extension}
+of the Raspberry Pi and a \emph{supervisory node} for the entire
+system. Its responsibilities are:
+ 
+\begin{itemize}
+    \item \textbf{Frame stream reception.} Accepts compressed video
+          frames from the Pi over WebSockets and, when acting in
+          fallback inference mode, passes them through the detection
+          pipeline.
+ 
+    \item \textbf{Lazy model loading.} Detection models are loaded
+          into memory only when the first inference request arrives,
+          reducing idle memory consumption on the
+          server~\cite{gamma1994design}.
+ 
+    \item \textbf{Health monitoring.} The server tracks heartbeat
+          signals from the Pi and maintains a live view of system
+          state, flagging connectivity loss or processing anomalies.
+ 
+    \item \textbf{Remote control relay.} Commands issued by the user
+          through the dashboard are validated and forwarded to the Pi
+          over the persistent WebSocket connection.
+\end{itemize}
+ 
+% ............................................................
+\subsection{User Dashboard}
+% ............................................................
+ 
+The web-based dashboard provides the human operator with a graphical
+interface for monitoring and controlling the system without requiring
+direct access to the embedded hardware. Through the dashboard, an
+operator can:
+ 
+\begin{itemize}
+    \item Start or stop the live camera stream.
+    \item Issue manual control commands to the robot.
+    \item Trigger a remote reboot or system reset of the Raspberry Pi.
+    \item Monitor real-time system health metrics (CPU load,
+          temperature, connection status, detection counts).
+\end{itemize}
+ 
+The dashboard communicates exclusively with the backend server;
+it has no direct connection to the embedded hardware, which keeps
+the interface layer isolated from hardware-specific
+details~\cite{gamma1994design}.
+ 
+\bigskip
+\noindent\textbf{[DIAGRAM 6 — Dashboard UI Mockup / Screenshot]}\\
+\textit{A screenshot or wireframe of the dashboard showing the live
+stream panel, status indicators, and control buttons. Place here if
+the UI is implemented; otherwise a wireframe is sufficient.}
+\bigskip
+ 
+% ............................................................
+\subsection{Finite State Machine (FSM) for System Control}
+\label{sec:fsm}
+% ............................................................
+ 
+The overall behaviour of the Raspberry Pi is governed by a
+\emph{Finite State Machine} (FSM)~\cite{hopcroft2006automata}. An FSM
+is a computational model that defines a fixed set of states and the
+conditions under which the system transitions between them. Using an
+FSM makes system behaviour explicit, predictable, and easy to
+validate — properties that are essential in a safety-relevant
+agricultural robotics context.
+ 
+The FSM defines five states:
+ 
+\begin{itemize}
+    \item \textbf{Idle.} The system is initialised and connected but
+          not actively processing. Waiting for a user command or
+          scheduled trigger.
+ 
+    \item \textbf{Streaming.} The camera capture and communication
+          threads are active; frames are being acquired and forwarded.
+          No detection is running.
+ 
+    \item \textbf{Detection.} The inference thread is active;
+          frames are being analysed for target objects.
+ 
+    \item \textbf{Actuation.} A detection event has been confirmed;
+          the system is executing the corresponding physical action
+          (e.g., spraying). The camera and inference threads continue
+          running.
+ 
+    \item \textbf{Error / Recovery.} An anomaly has been detected
+          (network loss, hardware fault, inference failure). The system
+          suspends normal operation, logs the fault, and attempts
+          recovery before returning to Idle.
+\end{itemize}
+ 
+\bigskip
+\noindent\textbf{[DIAGRAM 7 — FSM State Diagram]}\\
+\textit{A standard UML state diagram with the five states as rounded
+rectangles and labelled directed arrows for each transition (e.g.,
+``user starts stream'' Idle $\rightarrow$ Streaming; ``detection
+confirmed'' Detection $\rightarrow$ Actuation; ``fault raised'' any
+state $\rightarrow$ Error). This is one of the most important diagrams
+in the chapter — place immediately after this subsection.}
+\bigskip
+
+\section{Hardware Architecture}
+\label{sec:hardware}
+% ------------------------------------------------------------
+ 
+This section describes the hardware design of the system, covering the
+selection and role of each component, the power distribution strategy,
+and the inter-component communication scheme. The design follows a
+\emph{modular, distributed} approach: a high-level computing unit
+handles perception and decision-making, while a dedicated
+microcontroller manages real-time actuation. This separation reflects
+a well-established principle in embedded robotics — keeping
+computationally intensive tasks away from time-critical control
+loops~\cite{heath2002embedded}.
+ 
+It is important to note upfront that the hardware design described here
+represents the \emph{full intended architecture}. The implemented
+prototype integrates only the Raspberry Pi, Arduino, and camera module;
+the motor and pump subsystems remain part of the conceptual design and
+are documented here to provide a complete picture of the target
+platform and to guide future implementation.
+ 
+\bigskip
+\noindent\textbf{[DIAGRAM 1 — Hardware Block Diagram]}\\
+\textit{A block diagram showing all hardware components and their
+interconnections: Raspberry Pi (centre) connected to the Pi Camera
+(top), Arduino (right via USB), battery and buck converter (bottom
+left), and motor drivers + motors/pump (bottom right). Shade the
+implemented components differently from the conceptual ones to make
+the prototype boundary immediately visible. Place after this
+introduction paragraph.}
+\bigskip
+ 
+% ............................................................
+\subsection{Processing and Vision Unit — Raspberry Pi}
+% ............................................................
+ 
+The Raspberry Pi serves as the central processing unit of the system.
+It is responsible for three core functions: running the computer vision
+and object detection pipeline, executing the high-level system logic
+and Finite State Machine (see Section~\ref{sec:fsm}), and coordinating
+all communication between layers.
+ 
+The Raspberry Pi was selected for this role because it combines a
+multi-core ARM CPU with a full Linux environment, native Python
+support, and hardware interfaces (USB, GPIO, CSI camera port) that
+are sufficient for prototyping AI-enabled robotic systems while
+remaining within the power and cost constraints of an embedded
+platform~\cite{upton2016raspberry}.
+ 
+\paragraph{Camera module.}
+A Raspberry Pi Camera Module is connected directly to the board via
+the dedicated CSI (Camera Serial Interface) ribbon connector. The CSI
+interface offloads image transfer from the USB bus, providing a
+dedicated high-bandwidth, low-latency path for continuous frame
+acquisition~\cite{picamera2023}. The camera feeds raw frames into the
+inference pipeline described in Section~\ref{sec:inference_pipeline}.
+ 
+% ............................................................
+\subsection{Microcontroller Control Unit — Arduino}
+% ............................................................
+ 
+An Arduino microcontroller acts as the low-level control unit,
+responsible for executing hardware commands with deterministic timing.
+Microcontrollers are preferred over the Raspberry Pi for this role
+because they run bare-metal or RTOS firmware with no operating system
+scheduler overhead, guaranteeing response times in the order of
+microseconds rather than the milliseconds typical of a
+Linux-scheduled process~\cite{heath2002embedded}.
+ 
+The Arduino is connected to the Raspberry Pi over a \textbf{USB serial
+(UART)} link. This connection serves two purposes simultaneously: it
+supplies power to the Arduino from the Raspberry Pi's USB port, and it
+provides the communication channel through which the Pi sends command
+packets and the Arduino returns status acknowledgements.
+ 
+Upon receiving a command, the Arduino decodes it and drives the
+appropriate GPIO pins to control motors, relays, or other peripherals
+directly, without further involvement from the Raspberry Pi. This
+ensures that time-critical signals — such as a precise PWM waveform
+for motor speed control — are generated by hardware dedicated to
+that task alone.
+ 
+\bigskip
+\noindent\textbf{[DIAGRAM 2 — Raspberry Pi $\leftrightarrow$ Arduino
+Communication Detail]}\\
+\textit{A zoomed-in diagram showing the USB serial link between the
+two boards, with example command/acknowledgement byte sequences
+annotated on the arrows (e.g., \texttt{CMD:PUMP\_ON} $\rightarrow$,
+\texttt{ACK:OK} $\leftarrow$). Place after this subsection.}
+\bigskip
+ 
+% ............................................................
+\subsection{Actuation System — Motors and Pump Mechanism}
+% ............................................................
+ 
+The actuation layer is designed around DC motors interfaced through
+dedicated motor driver circuits. DC motors are driven by voltages and
+currents far beyond what a microcontroller GPIO pin can supply
+directly; motor drivers act as power amplifiers, accepting a
+low-power control signal from the Arduino and switching the full motor
+supply voltage accordingly~\cite{monk2016electronics}.
+ 
+The intended actuation configuration comprises two subsystems:
+ 
+\begin{itemize}
+    \item \textbf{Mobility subsystem.} Four DC motors arranged in a
+          \emph{differential drive} configuration — two on each side
+          of the chassis. Differential drive steers the robot by
+          varying the relative speed of the left and right motor
+          pairs; turning is achieved without a dedicated steering
+          mechanism, simplifying both hardware and
+          control~\cite{siegwart2011mobile}.
+ 
+    \item \textbf{Spraying subsystem.} Two DC motors dedicated to
+          driving the pump mechanism used for pesticide delivery.
+          These motors are controlled independently of the mobility
+          subsystem, allowing spraying to occur while the robot is
+          stationary or in motion.
+\end{itemize}
+ 
+Each motor group is controlled through its own motor driver circuit,
+which receives PWM (Pulse-Width Modulation) signals from the Arduino.
+By varying the PWM duty cycle, the Arduino adjusts motor speed
+continuously without the energy loss associated with resistive
+control~\cite{monk2016electronics}.
+ 
+\bigskip
+\noindent\textbf{[DIAGRAM 3 — Actuation Subsystem Layout]}\\
+\textit{A top-down schematic of the robot chassis showing the
+four drive motors (front-left, front-right, rear-left, rear-right),
+the two pump motors, and the motor driver modules that connect them
+to the Arduino. A separate inset can illustrate the differential
+drive steering principle (left motors faster $\Rightarrow$ turn
+right). Place after this subsection.}
+\bigskip
+ 
+% ............................................................
+\subsection{Power Distribution System}
+% ............................................................
+ 
+Reliable power delivery is a critical design concern in mobile robotic
+systems. High-current actuators can cause sudden voltage drops on a
+shared supply rail, which may reset or corrupt the operation of
+sensitive digital electronics~\cite{horowitz2015art}. To prevent this,
+the power system is partitioned into two isolated domains:
+ 
+\paragraph{Computational domain.}
+The Raspberry Pi is powered from the main battery through a
+\textbf{5\,V DC-DC buck converter}. A buck converter steps down the
+battery voltage efficiently (typically 85–95\% efficiency) and
+regulates the output to a stable 5\,V regardless of load
+variations~\cite{rashid2017power}. The Arduino derives its power
+directly from the Raspberry Pi's USB port (also 5\,V), so both
+computing units share the regulated supply without requiring a second
+converter.
+ 
+\paragraph{Actuation domain.}
+The DC motors and pump mechanism are powered directly from the main
+battery, bypassing the buck converter. This provides the motors with
+the full battery voltage and ensures that current spikes during motor
+start-up or stall do not propagate into the regulated 5\,V rail
+feeding the computing units.
+ 
+Table~\ref{tab:power} summarises the power domains of each component.
+ 
+\begin{table}[h]
+\centering
+\caption{Power supply domain for each system component.}
+\label{tab:power}
+\begin{tabular}{llcc}
+\hline
+\textbf{Component} & \textbf{Supply Path} & \textbf{Voltage} & \textbf{Domain} \\
+\hline
+Raspberry Pi     & Battery $\to$ Buck converter & 5\,V  & Computational \\
+Arduino          & Raspberry Pi USB port         & 5\,V  & Computational \\
+Pi Camera Module & Raspberry Pi CSI port         & 3.3\,V & Computational \\
+DC Drive Motors  & Battery (direct)              & Battery & Actuation \\
+Pump Motors      & Battery (direct)              & Battery & Actuation \\
+\hline
+\end{tabular}
+\end{table}
+ 
+\bigskip
+\noindent\textbf{[DIAGRAM 4 — Power Distribution Schematic]}\\
+\textit{A power-flow diagram starting from the battery, branching
+into the buck converter path (to Pi and Arduino) and the direct path
+(to motor drivers and motors). Use colour coding to distinguish the
+two power domains clearly. This diagram is important for
+understanding the isolation strategy — place it immediately after
+Table~\ref{tab:power}.}
+\bigskip
+ 
+% ............................................................
+\subsection{Inter-Component Communication Summary}
+% ............................................................
+ 
+Table~\ref{tab:comms} summarises the communication interfaces used
+between hardware components. Two physical interfaces are used in the
+system, each chosen to match the bandwidth and latency requirements
+of the data it carries.
+ 
+\begin{table}[h]
+\centering
+\caption{Hardware communication interfaces.}
+\label{tab:comms}
+\begin{tabular}{llll}
+\hline
+\textbf{Link} & \textbf{Interface} & \textbf{Direction} & \textbf{Data} \\
+\hline
+Pi $\leftrightarrow$ Server  & WebSocket (TCP/IP, Wi-Fi) & Bidirectional & Frames, commands, telemetry \\
+Pi $\leftrightarrow$ Arduino & USB Serial (UART)         & Bidirectional & Control commands, ACKs \\
+Pi $\leftrightarrow$ Camera  & CSI ribbon cable          & Unidirectional & Raw image frames \\
+Arduino $\leftrightarrow$ Motors & PWM via motor driver & Unidirectional & Speed / direction signals \\
+\hline
+\end{tabular}
+\end{table}
+ 
+The \textbf{CSI} interface between the Pi and the camera is
+unidirectional and hardware-accelerated, offloading frame transfer
+from the main CPU bus. The \textbf{USB serial} link between the Pi
+and Arduino is the sole path for all actuation commands; keeping it
+as a single, auditable channel simplifies debugging and ensures that
+every hardware action can be traced to a logged command.
+ 
+% ............................................................
+\subsection{Prototype Scope vs.\ Full Design}
+% ............................................................
+ 
+As stated at the outset of this section, the current prototype
+implements a subset of the full hardware design. Table~\ref{tab:scope}
+maps each hardware subsystem to its implementation status.
+ 
+\begin{table}[h]
+\centering
+\caption{Implementation status of hardware subsystems.}
+\label{tab:scope}
+\begin{tabular}{lcc}
+\hline
+\textbf{Subsystem} & \textbf{In Full Design} & \textbf{In Prototype} \\
+\hline
+Raspberry Pi (SBC)         & \checkmark & \checkmark \\
+Pi Camera Module           & \checkmark & \checkmark \\
+Arduino microcontroller    & \checkmark & \checkmark \\
+DC drive motors + drivers  & \checkmark & $\times$   \\
+Pump motors + drivers      & \checkmark & $\times$   \\
+Buck converter (5\,V)      & \checkmark & \checkmark \\
+Battery power supply       & \checkmark & $\times$   \\
+\hline
+\end{tabular}
+\end{table}
+ 
+This scoping decision reflects the priority of the current project
+phase: validating the software architecture, communication pipeline,
+and model deployment strategy on real hardware before committing to
+the mechanical and electrical integration of the mobility and
+spraying subsystems. The modular design ensures that adding the
+remaining hardware components in a future iteration requires no
+changes to the software or communication architecture described in
+Section~\ref{sec:architecture}.
+
+
+\section{Software Architecture}
+\label{sec:software}
+% ------------------------------------------------------------
+ 
+The software architecture is designed around a clear separation of
+concerns between two independent subsystems: the \emph{Raspberry Pi
+software stack}, which handles high-level coordination, perception,
+and communication, and the \emph{Arduino firmware}, which executes
+time-critical, low-level actuator control. This division mirrors the
+hardware partitioning described in Section~\ref{sec:hardware} and
+reflects a fundamental principle of embedded systems design — keeping
+computationally intensive tasks structurally isolated from real-time
+control loops so that neither can interfere with the other's timing
+guarantees~\cite{heath2002embedded}.
+ 
+The remainder of this section describes each subsystem in turn,
+covering internal module structure, inter-module data flow, and the
+safety mechanisms embedded at each layer.
+ 
+\bigskip
+\noindent\textbf{[DIAGRAM 1 — Top-Level Software Partitioning]}\\
+\textit{A two-column block diagram: left column shows the Raspberry Pi
+software stack (five layers stacked vertically); right column shows the
+Arduino firmware (four modules). A bidirectional arrow labelled
+``UART serial'' connects the two columns at the communication boundary.
+Place after this introduction paragraph.}
+\bigskip
+ 
+% ------------------------------------------------------------
+\subsection{Arduino Firmware Architecture}
+% ------------------------------------------------------------
+ 
+The Arduino firmware operates as a \emph{serial-controlled actuator
+node}: it exposes a simple command interface over UART and translates
+received commands into hardware signals, completely hiding the
+electrical details of motor drivers and relay circuits from the host
+system. This abstraction means the Raspberry Pi never needs to know
+how many PWM pins a motor requires or what logic level activates a
+relay — it simply sends a named command and waits for an
+acknowledgement.
+ 
+The firmware is organised into four modules, each with a single
+well-defined responsibility:
+ 
+\paragraph{1. Actuator Abstraction Layer (AAL).}
+The AAL maintains the \emph{logical state} of every actuator in
+software — motor speed (as a normalised value), direction (forward /
+reverse / brake), and pump status (on / off). All other modules
+interact with actuators through the AAL rather than manipulating
+hardware registers directly. This indirection means that if a motor
+driver is swapped for a different model, only the Hardware Abstraction
+Layer needs to change~\cite{gamma1994design}.
+ 
+\paragraph{2. Hardware Abstraction Layer (HAL).}
+The HAL translates the logical actuator states maintained by the AAL
+into concrete hardware signals. For motors this means computing PWM
+duty cycles and writing them to the appropriate timer registers; for
+the pump relay it means asserting or deasserting a GPIO pin. The HAL
+is the only module that has direct knowledge of pin assignments and
+hardware-specific timing requirements~\cite{heath2002embedded}.
+ 
+\paragraph{3. Command Processor.}
+The Command Processor reads newline-delimited text frames from the
+UART receive buffer, parses and validates them, and dispatches the
+corresponding actions to the AAL. Using human-readable, text-based
+commands (rather than a binary protocol) simplifies debugging — a
+serial monitor can be attached to inspect all traffic without a
+protocol decoder. Validation rejects malformed or out-of-range
+commands before they reach the AAL, preventing erroneous actuator
+states from being applied~\cite{axelson2007serial}.
+ 
+\paragraph{4. Failsafe Monitor.}
+The Failsafe Monitor implements a \emph{watchdog-style heartbeat
+mechanism}. Whenever any actuator is in an active state, the monitor
+checks that a valid command or keep-alive packet has been received
+within a configurable timeout window. If communication is interrupted
+— due to host software failure, USB disconnection, or physical cable
+fault — the monitor immediately commands all actuators to their idle
+state and sets an internal error flag. This fail-safe behaviour
+prevents the robot from continuing to move or spray uncontrollably in
+the absence of a supervising host~\cite{kopetz2011real}.
+ 
+\bigskip
+\noindent\textbf{[DIAGRAM 2 — Arduino Firmware Module Diagram]}\\
+\textit{Four stacked boxes (Command Processor on top, AAL below it,
+HAL below that, physical hardware at the bottom) with a vertical data
+flow arrow labelled ``UART RX'' entering the Command Processor from
+the left and ``PWM / GPIO'' exiting the HAL to the right. The
+Failsafe Monitor sits as a side box with a monitoring arrow pointing
+into the AAL. Place after this subsection.}
+\bigskip
+ 
+% ------------------------------------------------------------
+\subsection{Raspberry Pi Software Architecture}
+% ------------------------------------------------------------
+ 
+The Raspberry Pi software stack is responsible for everything above
+the hardware serial link: acquiring sensor data, running AI inference,
+managing external communication, and making decisions that drive the
+rest of the system. The stack follows a \emph{layered,
+event-driven architecture}, where each layer has a defined role and
+communicates with adjacent layers through well-specified
+interfaces~\cite{bass2021software}.
+ 
+The five layers, from lowest to highest level of abstraction, are
+described below.
+ 
+\bigskip
+\noindent\textbf{[DIAGRAM 3 — Raspberry Pi Five-Layer Stack]}\\
+\textit{Five horizontal bands stacked vertically, labelled (bottom to
+top): Hardware Layer, State Management Layer, Services Layer,
+Application Layer, Utility Layer. Annotate each band with its key
+components (e.g., Services Layer: Camera Service, Inference Service,
+Communication Service, Health Monitor, Watchdog). Vertical arrows show
+upward data flow and downward control flow. Place before the layer
+descriptions below.}
+\bigskip
+ 
+\paragraph{1. Hardware Layer.}
+The Hardware Layer provides software interfaces to physical devices.
+It wraps the camera module (via the CSI interface) and the Arduino
+serial link (via USB UART) behind consistent Python objects, so that
+higher layers acquire a frame or send a command through the same API
+regardless of the underlying driver implementation. This isolates
+driver-specific code to a single location and allows hardware to be
+simulated during unit testing~\cite{gamma1994design}.
+ 
+\paragraph{2. State Management Layer.}
+The State Management Layer hosts the central \emph{Finite State
+Machine} (FSM) that governs the robot's operational lifecycle (see
+Section~\ref{sec:fsm} for the full state diagram). The FSM is the
+sole authority on what the system is allowed to do at any given
+moment: it gates service start-up, controls state transitions in
+response to events from the Services Layer, and triggers the
+appropriate shutdown or recovery procedures on fault detection. All
+other layers interact with the FSM by posting events; they never
+transition states directly~\cite{hopcroft2006automata}.
+ 
+\paragraph{3. Services Layer.}
+The Services Layer forms the operational core of the runtime
+environment. It comprises five concurrent services, each running in
+its own thread:
+ 
+\begin{itemize}
+    \item \textbf{Camera Service.} Continuously acquires frames from
+          the Hardware Layer and places them on a shared frame queue
+          for consumption by the Inference Service.
+ 
+    \item \textbf{Inference Service.} Dequeues frames and runs the
+          object detection model. On a positive detection it posts
+          a detection event to the FSM event queue. The service
+          transparently selects between local and remote inference
+          modes as described in Section~\ref{sec:inference_pipeline}.
+ 
+    \item \textbf{Communication Service.} Manages the WebSocket
+          connection to the backend server (outgoing frame stream,
+          incoming control commands) and the serial connection to the
+          Arduino (outgoing actuation commands, incoming status
+          acknowledgements).
+ 
+    \item \textbf{Health Monitor.} Periodically samples CPU load,
+          memory usage, temperature, and connection status, and
+          publishes this telemetry to the server and the local log.
+ 
+    \item \textbf{Watchdog.} Independently verifies that each service
+          thread is still alive and processing. If a thread becomes
+          unresponsive — due to deadlock, an unhandled exception, or
+          resource exhaustion — the Watchdog raises a fault event
+          to the FSM, which then initiates a controlled recovery or
+          shutdown sequence~\cite{kopetz2011real}.
+\end{itemize}
+ 
+\paragraph{4. Application Layer.}
+The Application Layer is the entry point of the system. On startup it
+reads the configuration, instantiates all services and hardware
+drivers, runs a pre-flight health check that verifies connectivity and
+model availability, and then transfers control to the FSM. On
+shutdown it ensures that all threads are joined cleanly and that the
+Arduino is commanded to idle before the process exits. The Application
+Layer deliberately contains no business logic — it only orchestrates
+the lifecycle of the layers below it~\cite{bass2021software}.
+ 
+\paragraph{5. Utility Layer.}
+The Utility Layer provides shared infrastructure consumed by all other
+layers: a structured logging system that tags every record with
+timestamp, thread identity, and severity; a configuration manager
+that loads parameters from a single file and exposes them through a
+typed interface; and lightweight shared data structures (thread-safe
+queues, event objects) used for inter-layer communication. Centralising
+these concerns prevents duplication and ensures consistent behaviour
+across the entire codebase~\cite{martin2008clean}.
+ 
+% ............................................................
+\subsection{Software Engineering Principles Applied}
+% ............................................................
+ 
+The architecture embodies several established software engineering
+principles that improve long-term maintainability and testability:
+ 
+\begin{itemize}
+    \item \textbf{Separation of concerns.} Each layer and each service
+          has a distinct responsibility. Perception, communication,
+          control, and monitoring are never mixed within a single
+          module~\cite{dijkstra1982role}.
+ 
+    \item \textbf{Single responsibility principle.} Every class or
+          module addresses exactly one aspect of system
+          behaviour~\cite{martin2008clean}. This makes individual
+          components easier to test in isolation and reduces the risk
+          that a change in one area breaks another.
+ 
+    \item \textbf{Dependency injection.} Services receive their
+          dependencies (hardware drivers, configuration objects,
+          shared queues) as constructor arguments rather than
+          instantiating them internally. This decouples modules from
+          concrete implementations and enables mock objects to be
+          substituted during testing~\cite{gamma1994design}.
+ 
+    \item \textbf{Fail-fast error handling.} Errors are detected and
+          propagated upward to the FSM as early as possible rather
+          than being silently ignored or retried indefinitely. This
+          prevents the system from operating in an undefined
+          degraded state~\cite{martin2008clean}.
+ 
+    \item \textbf{Centralised configuration management.} All tunable
+          parameters — timeouts, model paths, server addresses,
+          camera resolution — are stored in a single configuration
+          file managed by the Utility Layer. No magic numbers appear
+          in application code.
+\end{itemize}
+ 
+Table~\ref{tab:sw_principles} maps each principle to the layer or
+component where it is primarily enforced.
+ 
+\begin{table}[h]
+\centering
+\caption{Software engineering principles and their primary enforcement points.}
+\label{tab:sw_principles}
+\begin{tabular}{ll}
+\hline
+\textbf{Principle} & \textbf{Primary Enforcement Point} \\
+\hline
+Separation of concerns      & All inter-layer boundaries          \\
+Single responsibility       & Individual service classes          \\
+Dependency injection        & Application Layer (object wiring)   \\
+Fail-fast error handling    & FSM + Watchdog                      \\
+Centralised configuration   & Utility Layer (config manager)      \\
+\hline
+\end{tabular}
+\end{table}
+ 
+\bigskip
+\noindent\textbf{[DIAGRAM 4 — Startup and Shutdown Sequence Diagram]}\\
+\textit{A UML sequence diagram showing the Application Layer
+orchestrating startup: Config load $\rightarrow$ Hardware Layer init
+$\rightarrow$ Services Layer init $\rightarrow$ Health check
+$\rightarrow$ FSM transition to Operational. A second sequence
+(right side or below) shows the shutdown path: Fault event
+$\rightarrow$ FSM $\rightarrow$ Services teardown $\rightarrow$
+Arduino idle command $\rightarrow$ process exit. Place after
+Table~\ref{tab:sw_principles}.}
+\bigskip
+
+\section{Communication Architecture}
+\label{sec:communication}
+% ------------------------------------------------------------
+ 
+The system employs a \emph{two-channel distributed communication
+architecture} in which the Raspberry Pi acts as a central gateway,
+bridging a network-facing channel on one side and a hardware-facing
+channel on the other. Each channel is designed independently to match
+the specific requirements of its domain — bandwidth, latency,
+reliability, and message semantics — while the Raspberry Pi
+translates between them, insulating network logic from hardware
+control logic and vice versa~\cite{tanenbaum2021networks}.
+ 
+\bigskip
+\noindent\textbf{[DIAGRAM 1 — Communication Architecture Overview]}\\
+\textit{A three-node horizontal diagram: Server (left)
+$\xleftrightarrow{\text{WebSocket / TCP}}$ Raspberry Pi (centre)
+$\xleftrightarrow{\text{UART / USB}}$ Arduino (right). Annotate each
+arrow with message categories: outbound from Pi to server (state,
+telemetry, detections), inbound from server to Pi (commands), outbound
+from Pi to Arduino (actuator commands), inbound from Arduino to Pi
+(ACKs, status). Place after this introduction paragraph.}
+\bigskip
+ 
+% ............................................................
+\subsection{Server-to-Raspberry Pi Communication — WebSocket}
+% ............................................................
+ 
+The link between the backend server and the Raspberry Pi is
+implemented using the \textbf{WebSocket protocol}
+(RFC~6455)~\cite{fette2011websocket}. WebSocket upgrades a standard
+HTTP connection into a persistent, full-duplex TCP channel: once the
+handshake is complete, either party can push a message at any time
+without waiting for a request from the other side. This property makes
+WebSocket well-suited for real-time telemetry and control, where the
+server must be able to issue commands reactively and the robot must be
+able to report events as they occur, with minimal
+latency~\cite{lubbers2011websocket}.
+ 
+The Raspberry Pi establishes the connection as a client, initiating an
+outbound connection to a dedicated control endpoint on the server.
+Maintaining the Pi as the initiating party simplifies network
+configuration — the server does not need to reach the Pi's private
+address, and no inbound port-forwarding rules are required on the
+robot's network.
+ 
+\paragraph{Raspberry Pi $\to$ Server (uplink).}
+The following message categories are sent by the Pi to the server:
+ 
+\begin{itemize}
+    \item \textbf{Robot state.} Current FSM state (Idle, Streaming,
+          Detection, Actuation, Error), enabling the dashboard to
+          reflect live operational status.
+    \item \textbf{Periodic status updates.} Heartbeat frames confirming
+          that the Pi process is alive and the connection is healthy.
+    \item \textbf{System health telemetry.} CPU load, memory
+          utilisation, core temperature, and uptime — collected by the
+          Health Monitor service described in
+          Section~\ref{sec:software}.
+    \item \textbf{AI detection results.} Bounding box coordinates,
+          class labels, and confidence scores produced by the
+          Inference Service, forwarded to the server for logging and
+          display on the dashboard.
+\end{itemize}
+ 
+\paragraph{Server $\to$ Raspberry Pi (downlink).}
+The following command categories are received by the Pi from the
+server:
+ 
+\begin{itemize}
+    \item \textbf{Movement commands.} Directional instructions
+          (forward, reverse, turn left, turn right, stop) to be
+          translated into motor commands and forwarded to the Arduino.
+    \item \textbf{Operational mode changes.} Instructions to switch
+          between local and remote inference modes, or to activate
+          and deactivate the detection pipeline.
+    \item \textbf{Inference control.} Start and stop commands for
+          the AI processing loop, allowing the operator to enable
+          detection only when needed to reduce computational load.
+    \item \textbf{System management.} Shutdown and reboot commands
+          that trigger a controlled teardown sequence through the FSM.
+\end{itemize}
+ 
+% ............................................................
+\subsection{Raspberry Pi-to-Arduino Communication — UART Serial}
+% ............................................................
+ 
+The link between the Raspberry Pi and the Arduino is implemented as a
+\textbf{UART serial connection over USB}. Unlike WebSocket, which
+operates over a network stack with variable latency, UART provides a
+point-to-point, hardware-level byte stream with deterministic
+timing — an appropriate choice for delivering actuator commands that
+must be executed promptly and reliably~\cite{axelson2007serial}.
+ 
+The USB connection serves a dual purpose: it carries the serial data
+stream \emph{and} provides 5\,V power to the Arduino, eliminating the
+need for a separate power cable between the two boards (as noted in
+Section~\ref{sec:hardware}).
+ 
+\paragraph{Protocol design.}
+The protocol follows a \emph{command-response model}: the Raspberry Pi
+sends a command frame, and the Arduino replies with an acknowledgement
+or status report before the Pi sends the next command. This simple
+half-duplex exchange provides built-in flow control without a complex
+protocol stack~\cite{axelson2007serial}.
+ 
+Commands are encoded as \textbf{newline-terminated ASCII strings}
+rather than a compact binary format. While binary encoding would reduce
+per-message byte count, ASCII provides two practical advantages during
+development and debugging: a serial monitor (e.g., the Arduino IDE
+Serial Monitor) can display all traffic in human-readable form without
+a protocol decoder, and malformed messages are immediately recognisable
+by inspection.
+ 
+\paragraph{Supported command categories.}
+\begin{itemize}
+    \item \textbf{Motor control.} Speed and direction commands for the
+          four drive motors, mapped to PWM duty cycles by the
+          Arduino's Hardware Abstraction Layer.
+    \item \textbf{Pump control.} Activation and deactivation of the
+          spraying pump mechanism.
+    \item \textbf{Status request.} A polling command that causes the
+          Arduino to report the current state of all actuators.
+    \item \textbf{Emergency stop.} A priority command that immediately
+          idles all actuators regardless of current state, mirroring
+          the hardware-level failsafe described in
+          Section~\ref{sec:software}.
+\end{itemize}
+ 
+\paragraph{Arduino responses.}
+The Arduino replies to every command with one of three response types:
+an \emph{acknowledgement} confirming successful execution, a
+\emph{status report} enumerating actuator states, or an \emph{error
+message} indicating a validation failure or hardware fault. This
+feedback loop allows the Raspberry Pi's Communication Service to
+detect silent failures — cases where a command was sent but no
+response was received within the expected window — and escalate them
+to the FSM as fault events.
+ 
+% ............................................................
+\subsection{End-to-End Data Flow}
+% ............................................................
+ 
+Figure~\ref{fig:dataflow} illustrates the complete data flow through
+the communication architecture, from user input at the dashboard to
+physical actuation at the robot, and from sensor data at the robot
+back to the dashboard.
+ 
+\bigskip
+\noindent\textbf{[DIAGRAM 2 — End-to-End Data Flow]}\\
+\textit{A vertical flow diagram with four horizontal tiers: Dashboard
+(top), Server, Raspberry Pi, Arduino / Hardware (bottom). Downward
+arrows carry control commands; upward arrows carry telemetry and
+detection results. Label each arrow with the protocol and example
+message type. The Raspberry Pi tier should show the internal
+translation step (WebSocket message parsed $\to$ UART command
+generated). Reference this as Figure~\ref{fig:dataflow} in the text.
+Place immediately here.}
+\label{fig:dataflow}
+\bigskip
+ 
+\paragraph{Control path (top-down).}
+\begin{enumerate}
+    \item The operator issues a command (e.g., ``move forward'') via
+          the dashboard.
+    \item The dashboard sends the command to the server over HTTP or
+          WebSocket.
+    \item The server forwards the command to the Raspberry Pi over the
+          persistent WebSocket connection.
+    \item The Raspberry Pi's Communication Service receives the message,
+          validates it, and translates it into the corresponding UART
+          command string.
+    \item The command is transmitted to the Arduino over the serial
+          link.
+    \item The Arduino's Command Processor decodes the instruction and
+          updates the Actuator Abstraction Layer, which drives the
+          motor PWM signals accordingly.
+\end{enumerate}
+ 
+\paragraph{Data path (bottom-up).}
+\begin{enumerate}
+    \item The camera acquires a frame; the Inference Service runs
+          detection and produces a result.
+    \item The Arduino periodically reports actuator status to the
+          Raspberry Pi via the serial acknowledgement channel.
+    \item The Raspberry Pi aggregates detection results, actuator
+          status, and health telemetry, then forwards them to the
+          server over the WebSocket uplink.
+    \item The server relays the data to the dashboard, which updates
+          the live display in real time.
+\end{enumerate}
+ 
+\paragraph{Gateway role of the Raspberry Pi.}
+The Pi's role as a \emph{communication gateway}~\cite{tanenbaum2021networks}
+is central to the architecture's modularity. Because the server and
+the Arduino never communicate directly, either channel can be modified
+or replaced — for example, substituting MQTT for WebSocket on the
+network side, or upgrading to CAN bus on the hardware side — without
+requiring changes to the other. The only component that must be updated
+is the Pi's Communication Service, which is isolated in its own
+module precisely for this reason.
+ 
+Table~\ref{tab:comms_compare} summarises and contrasts the two
+communication channels.
+ 
+\begin{table}[h]
+\centering
+\caption{Comparison of the two communication channels.}
+\label{tab:comms_compare}
+\begin{tabular}{lll}
+\hline
+\textbf{Property}       & \textbf{WebSocket (Server $\leftrightarrow$ Pi)}
+                        & \textbf{UART (Pi $\leftrightarrow$ Arduino)} \\
+\hline
+Physical medium         & Wi-Fi / Ethernet (TCP/IP)  & USB cable           \\
+Protocol standard       & RFC 6455                   & UART / USB-CDC      \\
+Message format          & JSON / binary frames       & ASCII, newline-delimited \\
+Directionality          & Full-duplex                & Half-duplex (command-response) \\
+Latency characteristic  & Variable (network-bound)   & Deterministic       \\
+Primary concern         & Bandwidth, remote reach    & Timing, reliability \\
+Error detection         & TCP retransmission         & Application-level ACK \\
+\hline
+\end{tabular}
+\end{table}
+ 
+% ============================================================
+%  Chapter 3 — Conclusion
+% ============================================================
+ 
+\section*{Chapter Summary}
+\addcontentsline{toc}{section}{Chapter Summary}
+ 
+This chapter presented the complete system design of the proposed
+agricultural robotic platform across four interconnected dimensions.
+ 
+The \textbf{high-level architecture} (Section~\ref{sec:architecture})
+established the three-tier structure — embedded device, server, and
+dashboard — and introduced the event-driven, multi-threaded execution
+model that allows perception, communication, and control to proceed
+concurrently without blocking one another.
+ 
+The \textbf{hardware architecture} (Section~\ref{sec:hardware})
+defined the physical component set: the Raspberry Pi as the central
+processing unit, the Arduino as the real-time actuator controller,
+the camera module for visual perception, and the motor and pump
+subsystems for mobility and pesticide delivery. The two-domain power
+supply strategy was described as essential for preventing
+high-current actuator transients from corrupting the computational
+supply rail. The boundary between the implemented prototype and the
+full conceptual design was made explicit.
+ 
+The \textbf{software architecture} (Section~\ref{sec:software})
+described the layered design of both the Raspberry Pi stack — five
+layers from hardware abstraction up to the application entry point —
+and the Arduino firmware — four modules from command parsing down to
+hardware signal generation. The Finite State Machine, watchdog
+mechanisms, and fail-safe behaviours that make the system
+self-supervising and fault-tolerant were examined in detail.
+ 
+The \textbf{communication architecture} (Section~\ref{sec:communication})
+explained the two-channel design: WebSocket for full-duplex,
+low-latency network communication with the server, and UART serial
+for deterministic, auditable command delivery to the Arduino. The
+end-to-end data flow — from operator input at the dashboard through
+to physical actuation, and from sensor data back to the live display
+— was traced in both directions.
+ 
+Together, these four sections establish that the system design is
+modular, fault-tolerant, and extensible. The deliberate separation of
+concerns at every layer — between network and hardware communication,
+between high-level logic and real-time control, between perception and
+actuation — ensures that each subsystem can be developed, tested, and
+upgraded independently.
+ 
+Chapter~4 proceeds to document the implementation of this design,
+covering the specific tools, libraries, and engineering decisions made
+during development, and the challenges encountered in translating the
+architectural model into a working prototype.

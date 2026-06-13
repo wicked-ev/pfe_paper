@@ -1,0 +1,61 @@
+# LaTeX auxiliary and output files
+*.aux
+*.bbl
+*.bcf
+*.blg
+*.brf
+*.fdb_latexmk
+*.fls
+*.glg
+*.glo
+*.gls
+*.glsdefs
+*.idx
+*.ilg
+*.ind
+*.ist
+*.lof
+*.log
+*.lot
+*.nav
+*.out
+*.pct
+*.pdf
+*.ps
+*.snm
+*.synctex.gz
+*.toc
+*.vrb
+*.xdv
+
+# Generated with glossaries package
+*.acn
+*.acr
+*.alg
+
+# Generated with pythontex
+*.pytxcode
+*.pytxmcr
+
+# Backup and temporary files
+*.bak
+*.backup
+*.tmp
+*.swp
+*.swo
+*~
+
+# Editor specific
+.idea/
+.vscode/
+*.DS_Store
+
+# Build directories
+build/
+out/
+_output/
+__latexindent_temp/
+_minted-*
+
+# Dependency files / downloaded packages
+texmf-var/

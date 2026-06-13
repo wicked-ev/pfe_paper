@@ -1,0 +1,105 @@
+\documentclass[12pt]{report}   % or book / your university template
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{setspace}
+\usepackage{titling}
+\usepackage{ragged2e}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\usepackage{float}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage[table]{xcolor}
+
+\input{preamble}
+
+\begin{document}
+\thispagestyle{empty}
+
+% Logos row
+\begin{center}
+\begin{minipage}{0.2\textwidth}
+    \centering
+    \includegraphics[width=3cm]{figures/UHBC_uni.png}
+\end{minipage}
+\hfill
+\begin{minipage}{0.55\textwidth}
+    \centering
+    {\Large \textbf{Hassiba Benbouali University Of CHLEF}}
+\end{minipage}
+\hfill
+\begin{minipage}{0.2\textwidth}
+    \centering
+    \includegraphics[width=3cm]{figures/department.png}
+\end{minipage}
+\end{center}
+
+\begin{center}
+    {\large Ministry of Higher Education and Scientific Research}\\[0.3cm]
+    {\large Faculty of Exact Sciences and Computer Science}\\[0.3cm]
+    {\large Computer Science Department}
+
+    \vspace{2cm}
+    
+    \rule{0.8\textwidth}{0.8pt}
+    
+    \vspace{0.8cm}
+    
+    {\Huge \textbf{Design and Development of a Robot for Spraying Pesticides in Agriculture}}\\[0.4cm]
+    
+    \vspace{0.8cm}
+    
+    \rule{0.8\textwidth}{0.8pt}
+    
+    {\large Graduation Project For Obtaining The Master’s degree}
+    
+    \vspace{1.5cm}
+    
+    \vspace{2cm}
+
+    \noindent
+    \begin{minipage}{0.45\textwidth}
+        \textbf{\textit{Submitted by}}\\[0.4cm]
+        Name name\\
+        Name name\\
+        Name name
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.45\textwidth}
+        \raggedleft
+        \textbf{\textit{Supervised by}}\\[0.4cm]
+        Mr.Name\\
+        Mme. Nassima BOUSAHBA\\
+\end{minipage}
+
+\end{center}
+
+\include{frontmatter/dedication}
+\include{frontmatter/acknowledgments}
+\include{frontmatter/abstract}
+\include{frontmatter/resume}
+
+\tableofcontents
+\listoffigures
+\listoftables
+\clearpage
+
+% ---- Chapters ----
+\include{chapters/00-introduction}
+\include{chapters/01-Theoretical Background}
+\include{chapters/02-System Design and Methodology}
+\include{chapters/03-implementation}
+\include{chapters/04-results}
+\include{chapters/05-discussion}
+\include{chapters/06-conclusion}
+
+% ---- Bibliography ----
+\bibliographystyle{plain}
+\bibliography{bib1,sample}
+
+% ---- Appendix ----
+\appendix
+\include{appendix/appendix-a}
+
+\end{document}

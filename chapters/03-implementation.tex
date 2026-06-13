@@ -1,0 +1,266 @@
+\chapter{Implementation}
+
+% ------------------------------------------------------------
+\chapter{Implementation}
+% ------------------------------------------------------------
+ 
+\section*{Introduction}
+\addcontentsline{toc}{section}{Introduction}
+ 
+Chapter~3 established the architectural design of the system —
+defining what each component should do and how the layers relate to
+one another. This chapter documents how that design was realised in
+practice. The focus shifts from \emph{what was intended} to
+\emph{what was built}: the specific hardware, software tools,
+libraries, and engineering decisions that translate the architectural
+model into a functioning prototype.
+ 
+The implementation encompasses the following primary components:
+ 
+\begin{itemize}
+    \item The development environment, including hardware platform
+          selection, operating system, programming tools, and
+          dependency management.
+    \item The embedded inference pipeline, covering model format
+          conversion and the deployment challenges encountered on
+          the target hardware.
+    \item The Raspberry Pi software stack, including the multi-threaded
+          service architecture, the Finite State Machine runtime, and
+          the camera acquisition pipeline.
+    \item The Arduino firmware, covering the command processor,
+          actuator abstraction, and failsafe mechanism.
+    \item The communication layer, including the WebSocket client
+          implementation and the UART serial protocol.
+\end{itemize}
+ 
+A recurring theme throughout this chapter is the gap between
+theoretical deployment assumptions and practical hardware constraints.
+Several implementation decisions — most notably the choice of
+inference runtime and model format — were driven not by design
+preference but by the limitations of the available embedded hardware
+and the compatibility boundaries of the available software toolchains.
+These decisions are documented candidly so that future work can build
+on the lessons learned.
+ 
+% ------------------------------------------------------------
+\section{Development Environment}
+\label{sec:devenv}
+% ------------------------------------------------------------
+ 
+This section documents the hardware platform, software environment,
+and dependency management process used throughout the implementation
+phase. Establishing a reproducible and stable development environment
+was itself a significant engineering effort, particularly with respect
+to AI inference dependencies on constrained embedded hardware — a
+challenge that ultimately influenced core architectural decisions and
+is examined in detail in Section~\ref{sec:dep_challenges}.
+ 
+% ............................................................
+\subsection{Hardware Platform}
+% ............................................................
+ 
+The embedded hardware used in this project consists of three physical
+components, each serving a distinct role in the prototype system.
+ 
+\paragraph{Raspberry Pi 3 Model B+.}
+The Raspberry Pi 3B+ is the central processing unit of the embedded
+system. It features a 1.4\,GHz quad-core ARM Cortex-A53 processor,
+1\,GB of LPDDR2 RAM, integrated 802.11ac dual-band Wi-Fi, and a
+dedicated CSI camera port~\cite{upton2016raspberry}. While the
+Cortex-A53 is a capable general-purpose processor, it lacks a
+dedicated neural processing unit (NPU) or hardware floating-point
+accelerator optimised for inference workloads — a limitation that
+proved consequential during the model deployment phase (see
+Section~\ref{sec:dep_challenges}).
+ 
+\paragraph{Arduino Uno.}
+The Arduino Uno is based on the ATmega328P 8-bit microcontroller
+running at 16\,MHz with 2\,KB of SRAM and 32\,KB of flash
+storage~\cite{monk2016electronics}. It is responsible exclusively for
+low-level actuator control: receiving UART commands from the Raspberry
+Pi and generating the PWM signals required by motor drivers and relay
+circuits. Its limited resources are well-matched to this role — the
+firmware is small and its execution timing is deterministic.
+ 
+\paragraph{Raspberry Pi Camera Module 3.}
+The Camera Module 3 connects to the Raspberry Pi via the CSI ribbon
+interface and provides up to 12\,MP resolution through a Sony IMX708
+sensor~\cite{picamera2023}. For inference purposes frames are captured
+at a reduced resolution to balance image quality against the
+computational cost of preprocessing and model inference on the
+embedded processor.
+ 
+% ............................................................
+\subsection{Software Environment}
+% ............................................................
+ 
+\paragraph{Raspbian GNU/Linux 13 (Trixie).}
+The operating system is Raspbian (Raspberry Pi OS) based on Debian 13
+``Trixie'', a 64-bit Linux distribution maintained by the Raspberry Pi
+Foundation and optimised for the Raspberry Pi hardware
+family~\cite{raspios2024}. The 64-bit userspace is important for AI
+inference libraries, many of which distribute pre-built wheels only
+for \texttt{aarch64} and not for the legacy 32-bit \texttt{armv7l}
+architecture.
+ 
+\paragraph{Python 3.13.5.}
+Python 3.13.5 is the primary application programming language for all
+Raspberry Pi software. Python was chosen for its extensive ecosystem
+of computer vision and machine learning libraries, its compatibility
+with the inference runtimes under consideration, and its suitability
+for rapid prototyping of complex, multi-threaded
+systems~\cite{python313}.
+ 
+\paragraph{Arduino IDE.}
+The Arduino Integrated Development Environment is used to write,
+compile, and flash the C++ firmware onto the Arduino Uno. The IDE
+provides the AVR-GCC toolchain and the \texttt{avrdude} programmer
+required to deploy firmware over USB without additional
+tools~\cite{arduinoide}.
+ 
+\paragraph{Raspberry Pi Connect.}
+Raspberry Pi Connect is a secure remote access service provided by
+the Raspberry Pi Foundation that enables shell and desktop access to
+a Raspberry Pi over the internet without configuring port forwarding
+or a VPN~\cite{rpconnect2024}. It was used during development to
+remotely monitor, debug, and redeploy software on the embedded device
+without requiring physical access.
+ 
+\paragraph{OpenCV.}
+OpenCV (Open Source Computer Vision Library) is an open-source
+library providing optimised implementations of image processing
+algorithms~\cite{bradski2000opencv}. In this project it is used for
+frame preprocessing (resizing, colour space conversion, normalisation)
+before frames are passed to the inference pipeline.
+ 
+\paragraph{ONNX Runtime.}
+ONNX Runtime is a cross-platform inference engine for models in the
+Open Neural Network Exchange format~\cite{onnxruntime2023}. It was
+selected as the primary inference backend for the server-side
+deployment path due to its broad operator support, active maintenance,
+and strong performance on Linux x86-64 hardware.
+ 
+\paragraph{TensorFlow Lite.}
+TensorFlow Lite is Google's inference framework for mobile and
+embedded devices~\cite{david2021tensorflow}. It was evaluated as an
+alternative embedded inference backend during the dependency
+investigation described in Section~\ref{sec:dep_challenges}.
+ 
+% ............................................................
+\subsection{Build and Dependency Management}
+% ............................................................
+ 
+Python dependencies for the Raspberry Pi software stack are managed
+using a virtual environment (\texttt{venv}) to isolate project
+packages from the system Python installation. CMake is used where
+native extension modules require compilation from source — a
+requirement that arose during several inference library installation
+attempts on the ARM platform.
+ 
+\subsubsection{Dependency and Deployment Challenges}
+\label{sec:dep_challenges}
+ 
+One of the most time-consuming aspects of the implementation phase was
+resolving inference runtime dependencies on the Raspberry Pi 3B+.
+This section documents the investigation process and the decisions it
+produced, because these constraints directly shaped the final
+deployment architecture.
+ 
+\paragraph{Stage 1 — Direct RF-DETR Inference.}
+The initial intention was to run the RF-DETR Nano model directly on
+the Raspberry Pi using its native PyTorch weights. Profiling quickly
+revealed that the model was too computationally demanding for the
+Cortex-A53 processor: inference times were far outside the range
+acceptable for real-time operation, and peak memory usage approached
+the device's 1\,GB RAM limit. A lighter-weight, hardware-optimised
+format was required.
+ 
+\paragraph{Stage 2 — ONNX Runtime on the Raspberry Pi.}
+The model was exported to ONNX format (as described in
+Section~\ref{sec:quantization}) and ONNX Runtime was identified as
+the preferred embedded inference engine due to its Linux compatibility
+and active ARM support. However, after export, no pre-built
+\texttt{.whl} package for ONNX Runtime was available that matched
+the combination of Python 3.13.5 and the \texttt{aarch64} architecture
+of the Raspberry Pi 3B+. Attempts to install wheels built for adjacent
+Python versions (3.11, 3.12) failed due to ABI incompatibilities.
+Compiling ONNX Runtime from source requires CMake, a C++17-capable
+compiler, and a build process that exceeds the memory capacity of the
+device itself.
+ 
+Downgrading the Python runtime to a version with available ONNX
+Runtime wheels was explored, but this introduced conflicts with other
+project dependencies that required Python~3.13 APIs, making this path
+unviable.
+ 
+\paragraph{Stage 3 — TensorFlow Lite via ONNX Conversion.}
+TensorFlow Lite was considered as an alternative embedded runtime,
+as pre-built TFLite interpreter packages are available for a wider
+range of ARM Python configurations. Because RF-DETR has no native
+TFLite export path, a two-stage conversion pipeline was required:
+ 
+\begin{center}
+RF-DETR (PyTorch) $\xrightarrow{\text{torch.onnx.export}}$
+ONNX $\xrightarrow{\text{onnx2tf / ai\_edge\_torch}}$ TFLite
+\end{center}
+ 
+A compatible Python runtime version was identified under which the
+TFLite interpreter package installed successfully. However, this
+runtime version was incompatible with the system-installed OpenCV
+and \texttt{picamera2} bindings, which are compiled against the
+system Python and cannot be imported from a different interpreter.
+Custom wrapper solutions were prototyped to bridge frame acquisition
+from \texttt{picamera2} into the alternative runtime environment,
+but these introduced additional fragility and maintenance overhead.
+ 
+After completing the conversion pipeline, the resulting
+\texttt{.tflite} model failed to load on the target runtime. The
+RF-DETR architecture relies on custom attention and decoder operations
+that are not part of the standard TFLite operator set; the conversion
+tools emitted these as \emph{unsupported operators}, which the TFLite
+interpreter rejected at model initialisation time. Multiple conversion
+configurations and operator compatibility flags were tested without
+success.
+ 
+\paragraph{Resolution — Remote Inference Fallback.}
+Having exhausted the available embedded runtime options for the current
+hardware, the decision was made to adopt the remote inference fallback
+path described in Section~\ref{sec:inference_pipeline}: frames are
+streamed from the Raspberry Pi to the backend server over WebSocket,
+where ONNX Runtime on the x86-64 server executes inference and returns
+detection results to the Pi. This path has no operator-support
+constraints and imposes no memory or compute requirements on the
+embedded device itself.
+ 
+This outcome reinforces the value of designing the inference pipeline
+with a fallback mode from the outset (Section~\ref{sec:inference_pipeline}):
+the architectural decision to separate the inference interface from its
+implementation meant that switching from local to remote execution
+required no changes to the surrounding software stack.
+ 
+Table~\ref{tab:inference_stages} summarises the three stages of the
+investigation and their outcomes.
+ 
+\begin{table}[h]
+\centering
+\caption{Summary of embedded inference deployment investigation.}
+\label{tab:inference_stages}
+\begin{tabular}{p{3cm} p{4.5cm} p{4.5cm}}
+\hline
+\textbf{Approach} & \textbf{Blocker} & \textbf{Outcome} \\
+\hline
+Direct PyTorch (RF-DETR native) &
+    Compute and memory exceed Pi 3B+ capacity &
+    Abandoned \\
+ONNX Runtime on Pi &
+    No compatible wheel for Python 3.13 / \texttt{aarch64}; source build exceeds device RAM &
+    Abandoned \\
+TFLite via ONNX conversion &
+    RF-DETR custom operators unsupported by TFLite runtime; Python runtime conflict with system OpenCV &
+    Abandoned \\
+Remote inference (server ONNX Runtime) &
+    None &
+    \textbf{Adopted} \\
+\hline
+\end{tabular}
+\end{table}

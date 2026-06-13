@@ -1,0 +1,462 @@
+\chapter{Theoretical Background}
+
+\section{Introduction}
+This chapter presents the theoretical background and key technologies relevant to the development of the proposed system. The project combines concepts from computer vision, embedded artificial intelligence, robotics, and software engineering. In particular, it focuses on the challenges associated with deploying machine learning models on resource-constrained devices and integrating them into a cohesive robotic system. The purpose of this chapter is to provide the necessary foundation for understanding the design and implementation decisions described in later chapters.
+
+\section{Computer Vision for Embedded Object Detection}
+
+\subsection{Overview of Computer Vision in Robotics}
+
+Computer vision is a subfield of artificial intelligence that enables machines to extract meaningful information from images and video streams. In robotic systems, it serves as the primary perception mechanism, allowing autonomous or semi-autonomous systems to interpret and react to their environment. The general objective is to transform raw pixel data into structured information that can support decision-making processes.
+
+\subsection{Object Detection in Visual Systems}
+
+Object detection is the computer-vision task of simultaneously
+\emph{classifying} and \emph{localising} one or more objects within an
+image \cite{zou2023object}. Its output is typically a set of bounding
+boxes, each paired with a class label and a confidence score.
+
+Modern detectors are broadly divided into two families:
+ 
+\begin{itemize}
+    \item \textbf{Two-stage detectors} (e.g., Faster R-CNN) first
+          generate region proposals and then classify each
+          proposal~\cite{ren2015faster}. They tend to be highly
+          accurate but computationally expensive.
+ 
+    \item \textbf{Single-stage detectors} (e.g., YOLO, SSD) predict
+          boxes and classes in a single forward pass~\cite{redmon2016yolo},
+          making them well-suited for real-time and embedded
+          applications.
+\end{itemize}
+ 
+Performance is typically measured with \emph{mean Average Precision}
+(mAP), which summarises precision–recall trade-offs across all classes
+and Intersection-over-Union (IoU) thresholds~\cite{everingham2010pascal}.
+
+ 
+% ------------------------------------------------------------
+\section{Convolutional Neural Networks}
+% ------------------------------------------------------------
+ 
+A Convolutional Neural Network (CNN) is a class of deep neural network
+designed specifically for grid-structured data such as
+images~\cite{lecun1998gradient}. Three operations form its core:
+ 
+\begin{enumerate}
+    \item \textbf{Convolution} — a learnable filter slides over the
+          input to extract local spatial features (edges, textures,
+          shapes).
+    \item \textbf{Pooling} — spatially downsamples feature maps,
+          reducing computation and providing translation invariance.
+    \item \textbf{Fully connected layers} — aggregate extracted
+          features for final classification or regression.
+\end{enumerate}
+ 
+CNNs are central to object detection because their hierarchical
+feature extraction naturally captures low-level details (edges) in
+early layers and high-level semantics (object parts) in deeper
+layers~\cite{zeiler2014visualizing}. Backbone networks such as
+ResNet~\cite{he2016deep} and MobileNet~\cite{howard2017mobilenets}
+are commonly used as feature extractors inside detection pipelines,
+with MobileNet-style architectures preferred on embedded hardware due
+to their use of depthwise separable convolutions that drastically
+reduce parameter count and FLOPs.
+ 
+% ------------------------------------------------------------
+\section{Deep Learning}
+% ------------------------------------------------------------
+ 
+Deep learning refers to machine learning with neural networks
+containing many stacked layers, enabling automatic discovery of
+hierarchical representations directly from raw
+data~\cite{lecun2015deep}. Training is performed end-to-end via
+\emph{backpropagation} and \emph{stochastic gradient descent} (SGD),
+minimising a task-specific loss function over large labelled
+datasets~\cite{goodfellow2016deep}.
+ 
+Key factors that made deep learning dominant in computer vision are:
+ 
+\begin{itemize}
+    \item Large annotated datasets (ImageNet, COCO).
+    \item GPU-accelerated parallel computation.
+    \item Architectural innovations: batch normalisation, residual
+          connections, attention mechanisms.
+\end{itemize}
+ 
+More recently, \emph{transformer}-based architectures, originally
+developed for natural language processing~\cite{vaswani2017attention},
+have been successfully adapted to vision tasks through the Vision
+Transformer (ViT)~\cite{dosovitskiy2021image} and its descendants,
+achieving state-of-the-art results by modelling long-range spatial
+dependencies via self-attention — a capability CNNs approximate only
+indirectly through stacking layers.
+
+\subsection{RF-DETR Nano Model Overview}
+
+RF-DETR (Roboflow Detection Transformer) is a real-time
+transformer-based object detection architecture developed by
+Roboflow~\cite{rfdetr2024roboflow}. It is built on a
+\textbf{DINOv2}~\cite{oquab2023dinov2} vision transformer backbone,
+a self-supervised ViT pre-trained on large-scale image data that
+produces rich, generalizable feature representations without
+task-specific supervision.
+ 
+The architecture follows the DETR paradigm~\cite{carion2020end}:
+a transformer encoder–decoder processes backbone features and
+predicts a fixed set of object queries, each decoded into a bounding
+box and class label — eliminating hand-crafted components such as
+anchor generation and non-maximum suppression (NMS).
+ 
+The \textbf{Nano} variant is a size-optimised configuration of
+RF-DETR designed for deployment in resource-constrained environments.
+It reduces the number of encoder layers, embedding dimensions, and
+decoder queries relative to larger variants, achieving a favourable
+accuracy–latency trade-off suitable for embedded hardware.
+ 
+Key characteristics of RF-DETR Nano relevant to this work:
+ 
+\begin{itemize}
+    \item \textbf{Backbone:} DINOv2 ViT (small configuration),
+          providing strong pre-trained features.
+    \item \textbf{Decoder:} Transformer decoder with learnable object
+          queries; end-to-end trained with a Hungarian matching
+          loss~\cite{carion2020end}.
+    \item \textbf{Real-time inference:} Optimised for low-latency
+          detection without sacrificing significant accuracy compared
+          to larger models.
+    \item \textbf{No NMS:} The set-prediction formulation removes the
+          post-processing bottleneck common in CNN-based detectors.
+\end{itemize}
+ 
+Table~\ref{tab:rfdetr_compare} situates RF-DETR Nano among comparable
+lightweight detectors.
+ 
+\begin{table}[h]
+\centering
+\caption{Comparison of lightweight object detection models.}
+\label{tab:rfdetr_compare}
+\begin{tabular}{lccc}
+\hline
+\textbf{Model} & \textbf{Params (M)} & \textbf{mAP (COCO)} & \textbf{Architecture} \\
+\hline
+YOLOv8n        & 3.2  & 37.3 & CNN            \\
+RT-DETR-R18    & 20.0 & 46.5 & Transformer    \\
+RF-DETR Nano   & --   & --   & ViT + DETR     \\
+\hline
+\end{tabular}
+\end{table}
+
+\section{Model Deployment and Format Conversion for Edge Devices}
+% ------------------------------------------------------------
+ 
+Deploying deep learning models on embedded systems requires more than
+simply porting trained weights to a new device. Standard training
+frameworks such as PyTorch or TensorFlow are designed for
+high-performance workstations with abundant memory and floating-point
+units; they carry significant runtime overhead that is impractical on
+resource-constrained hardware~\cite{warden2019tinyml}. Bridging this
+gap involves two complementary strategies: \emph{format conversion},
+which re-expresses the model in a hardware-friendly representation,
+and \emph{quantization}, which reduces numerical precision to lower
+memory and compute requirements. Both are explored in this section.
+ 
+% ............................................................
+\subsection{ONNX (Open Neural Network Exchange)}
+% ............................................................
+ 
+ONNX is an open, vendor-neutral format for representing neural network
+models~\cite{bai2019onnx}. It defines a common computational graph
+whose nodes map to standard mathematical operations (convolutions,
+matrix multiplications, activations), allowing a model trained in
+one framework — say PyTorch — to be exported once and executed by
+any ONNX-compatible runtime without rewriting the model code.
+ 
+Key properties that make ONNX attractive for deployment pipelines:
+ 
+\begin{itemize}
+    \item \textbf{Framework interoperability.} Models from PyTorch,
+          TensorFlow, and others can all be serialised to the same
+          \texttt{.onnx} file and consumed by runtimes such as
+          ONNX Runtime, OpenVINO, or TensorRT.
+ 
+    \item \textbf{Graph optimisation.} ONNX Runtime applies
+          graph-level rewrites (operator fusion, constant folding)
+          that reduce inference latency independently of the original
+          framework~\cite{onnxruntime2023}.
+ 
+    \item \textbf{Hardware portability.} The same \texttt{.onnx} file
+          can target CPUs, GPUs, and dedicated accelerators through
+          pluggable \emph{execution providers}, requiring no changes
+          to the model graph itself.
+\end{itemize}
+ 
+In the context of embedded deployment, ONNX serves as an intermediate
+step: the model is first exported to ONNX to decouple it from the
+training framework, and then either executed directly via ONNX Runtime
+or converted further into a hardware-specific format.
+ 
+% ............................................................
+\subsection{TensorFlow Lite}
+% ............................................................
+ 
+TensorFlow Lite (TFLite) is a dedicated inference framework developed
+by Google for mobile and embedded devices~\cite{david2021tensorflow}.
+Unlike ONNX, which is primarily a \emph{model format}, TFLite is a
+complete \emph{inference stack} — it defines its own FlatBuffer-based
+model format (\texttt{.tflite}), a lightweight interpreter, and a
+set of hardware-specific delegates.
+ 
+\begin{itemize}
+    \item \textbf{FlatBuffer serialisation.} The \texttt{.tflite}
+          format is memory-mapped at runtime, allowing the interpreter
+          to begin inference without loading the entire model into
+          RAM — a critical advantage on devices with limited
+          memory~\cite{david2021tensorflow}.
+ 
+    \item \textbf{Delegate system.} Delegates offload portions of the
+          graph to accelerators: the GPU delegate targets OpenGL ES /
+          Metal, the NNAPI delegate targets Android neural network
+          hardware, and the XNNPACK delegate accelerates
+          floating-point operations on ARM CPUs via SIMD
+          intrinsics~\cite{xnnpack2020}.
+ 
+    \item \textbf{Built-in quantization support.} TFLite provides
+          first-class tooling for post-training quantization and
+          quantization-aware training (discussed in
+          Section~\ref{sec:quantization}), making it the most common
+          end-to-end pipeline for deploying quantised models on
+          edge hardware.
+\end{itemize}
+ 
+% ............................................................
+\subsection{Trade-offs in Format Conversion}
+% ............................................................
+ 
+Converting a model from its training format to a deployment format is
+rarely lossless. Practitioners must navigate several trade-offs:
+ 
+\begin{itemize}
+    \item \textbf{Operator coverage.} Not every layer or activation
+          function is supported by every runtime. Custom or exotic
+          operators may be unsupported, requiring architectural
+          changes before conversion succeeds.
+ 
+    \item \textbf{Numerical fidelity.} Graph optimisations such as
+          operator fusion change the order of floating-point
+          operations, which can introduce small numerical differences
+          compared to the original framework's output.
+ 
+    \item \textbf{Latency vs.\ accuracy.} Aggressively optimised
+          formats (especially when combined with quantization) reduce
+          inference time at the cost of a measurable drop in
+          prediction accuracy. Profiling on the target hardware is
+          essential to find an acceptable operating point.
+ 
+    \item \textbf{Toolchain complexity.} Each conversion step
+          (framework $\to$ ONNX $\to$ TFLite, for example) introduces
+          a potential failure point and requires version-compatible
+          tools.
+\end{itemize}
+ 
+In this project, both ONNX and TensorFlow Lite formats were evaluated
+as deployment candidates for the RF-DETR Nano model on the Raspberry Pi
+target platform.
+ 
+% ............................................................
+\subsection{Model Quantization}
+\label{sec:quantization}
+% ............................................................
+ 
+Quantization is the process of representing model weights and/or
+activations with lower-precision numeric types than the 32-bit
+floating-point (FP32) format used during training~\cite{jacob2018quantization}.
+It is one of the most effective techniques for reducing model size and
+accelerating inference on hardware that lacks native FP32 or FP16
+units — a common situation in microcontrollers and low-power
+SoCs~\cite{krishnamoorthi2018quantizing}.
+ 
+\subsubsection{Floating-Point Precision Levels}
+ 
+Before discussing quantization schemes it is helpful to understand the
+numeric formats involved:
+ 
+\begin{itemize}
+    \item \textbf{FP32 (32-bit float).} The IEEE 754 single-precision
+          standard: 1 sign bit, 8 exponent bits, 23 mantissa bits.
+          Used by default during training. High dynamic range and
+          precision but expensive in memory and compute.
+ 
+    \item \textbf{FP16 (16-bit float).} Half-precision: 1 sign,
+          5 exponent, 10 mantissa bits. Halves memory and bandwidth
+          requirements; natively accelerated on modern GPUs and some
+          edge NPUs. Introduces a reduced dynamic range that can cause
+          gradient underflow during training but is generally
+          acceptable for inference~\cite{micikevicius2018mixed}.
+ 
+    \item \textbf{BF16 (bfloat16).} An alternative 16-bit format with
+          the same 8-bit exponent as FP32 but only 7 mantissa bits.
+          Retains FP32's dynamic range, making it numerically safer
+          for training on TPUs and certain AI accelerators.
+ 
+    \item \textbf{INT8 (8-bit integer).} No fractional bits; values
+          mapped to the integer range $[-128, 127]$ (signed) or
+          $[0, 255]$ (unsigned) via a learned \emph{scale} and
+          \emph{zero-point}. Reduces model size by $4\times$ versus
+          FP32 and enables fast integer multiply-accumulate (MAC)
+          operations available on virtually all embedded
+          processors~\cite{jacob2018quantization}.
+ 
+    \item \textbf{INT4 / binary (1-bit).} Ultra-low precision formats
+          used in research contexts. They offer extreme compression
+          but typically incur significant accuracy loss and have
+          limited hardware support~\cite{hubara2017quantized}.
+\end{itemize}
+ 
+\subsubsection{Types of Quantization}
+ 
+There are two principal strategies for quantizing a trained model:
+ 
+\paragraph{Post-Training Quantization (PTQ).}
+PTQ converts a pre-trained FP32 model to lower precision without
+retraining~\cite{nagel2020up}. A small \emph{calibration dataset}
+(typically a few hundred representative images) is passed through
+the model to record the statistical range of each layer's activations.
+These statistics are used to compute the scale and zero-point
+parameters needed to map floating-point values to integers. PTQ
+is fast and convenient — no labelled training data are required —
+but can degrade accuracy noticeably on models with wide activation
+distributions.
+ 
+Two sub-variants are common in practice:
+ 
+\begin{itemize}
+    \item \textbf{Dynamic quantization.} Only the weights are
+          quantized ahead of time; activations are quantized
+          on-the-fly during inference. Straightforward to apply
+          but offers less speedup than full static quantization.
+ 
+    \item \textbf{Static quantization.} Both weights and activations
+          are quantized using calibration statistics gathered
+          offline. Faster at runtime but requires a representative
+          calibration set and careful range selection.
+\end{itemize}
+ 
+\paragraph{Quantization-Aware Training (QAT).}
+QAT simulates quantization during the forward pass of training by
+inserting \emph{fake quantization} nodes — operations that round
+values to the nearest representable integer and then immediately
+dequantize them back to float~\cite{jacob2018quantization}. Because
+gradients flow through these nodes, the model learns to compensate
+for quantization error. QAT consistently produces higher accuracy than
+PTQ, particularly at INT8, but requires access to training data and
+a longer training pipeline.
+ 
+Table~\ref{tab:quant_compare} summarises the trade-offs between the
+two approaches.
+ 
+\begin{table}[h]
+\centering
+\caption{Comparison of quantization strategies.}
+\label{tab:quant_compare}
+\begin{tabular}{lccc}
+\hline
+\textbf{Strategy} & \textbf{Training Required} & \textbf{Accuracy} & \textbf{Effort} \\
+\hline
+Post-Training (Dynamic)  & No  & Moderate & Low    \\
+Post-Training (Static)   & No  & Good     & Low    \\
+Quantization-Aware (QAT) & Yes & Best     & High   \\
+\hline
+\end{tabular}
+\end{table}
+ 
+% ------------------------------------------------------------
+\section{Embedded Systems for AI and Robotics}
+% ------------------------------------------------------------
+ 
+An \emph{embedded system} is a dedicated computing platform integrated
+into a larger device to perform a specific, well-defined
+function~\cite{heath2002embedded}. Unlike general-purpose computers,
+embedded systems are optimised for a particular workload and operate
+under tight constraints of processing power, memory, storage, and
+energy consumption.
+ 
+% ............................................................
+\subsection{Edge Computing}
+% ............................................................
+ 
+\emph{Edge computing} refers to the execution of computation at or
+near the source of data — on the device itself — rather than
+offloading to a remote cloud server~\cite{shi2016edge}. For
+robotics and real-time vision applications this distinction is
+critical:
+ 
+\begin{itemize}
+    \item \textbf{Latency.} A round trip to a cloud API can add
+          tens to hundreds of milliseconds of delay, which is
+          unacceptable for control loops that must respond within
+          milliseconds~\cite{shi2016edge}.
+ 
+    \item \textbf{Reliability.} On-device inference continues to
+          function when network connectivity is unavailable or
+          intermittent — common in agricultural or field robotics
+          scenarios.
+ 
+    \item \textbf{Privacy and bandwidth.} Processing sensor data
+          locally avoids transmitting raw images or video streams,
+          reducing both bandwidth cost and data-privacy risk.
+\end{itemize}
+ 
+% ............................................................
+\subsection{Constraints of Embedded AI}
+% ............................................................
+ 
+Running inference on embedded hardware is fundamentally different from
+running it on a workstation. Three constraints dominate system
+design~\cite{warden2019tinyml}:
+ 
+\begin{itemize}
+    \item \textbf{Compute.} Embedded CPUs operate at lower clock
+          frequencies and lack the massively parallel floating-point
+          units of desktop GPUs. Operations that are trivially fast on
+          a workstation may become the bottleneck on a single-board
+          computer.
+ 
+    \item \textbf{Memory.} RAM is typically measured in hundreds of
+          megabytes rather than gigabytes. Large model activations or
+          feature maps may exceed available memory, requiring
+          architectural choices — smaller input resolution,
+          fewer layers, or quantization — to bring the memory
+          footprint within bounds.
+ 
+    \item \textbf{Power.} Battery-operated platforms impose strict
+          power budgets. Higher computational load increases current
+          draw, reducing operating time and generating heat that
+          must be managed passively.
+\end{itemize}
+ 
+These constraints motivate every optimisation technique discussed in
+Section~\ref{sec:quantization}: reducing precision from FP32 to INT8
+lowers memory by $4\times$, reduces bandwidth, and replaces
+power-hungry floating-point MAC operations with cheaper integer ones.
+ 
+% ............................................................
+\subsection{The Raspberry Pi as an Edge Computing Platform}
+% ............................................................
+ 
+The Raspberry Pi is a single-board computer (SBC) developed by the
+Raspberry Pi Foundation~\cite{upton2016raspberry}. It integrates an
+ARM-based SoC, RAM, USB, GPIO, and camera interfaces onto a small,
+low-cost PCB, making it one of the most widely adopted platforms for
+prototyping embedded AI systems.
+ 
+In this project, the Raspberry Pi serves as the primary inference
+platform. It offers a Linux environment that supports standard Python
+tooling, ONNX Runtime, and TensorFlow Lite, while remaining
+representative of the class of devices targeted in real-world
+edge deployments. Its hardware limitations — a multi-core ARM CPU
+with no dedicated neural-network accelerator — make it an appropriate
+testbed for evaluating the latency impact of format conversion and
+quantization on RF-DETR Nano.
+
+

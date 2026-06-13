@@ -1,0 +1,112 @@
+\chapter{State of the art in Agricultural Robotics and AI}
+\section{Introduction}
+\subsection{Overview of Automation and Artificial Intelligence in Agriculture}
+The agricultural sector is undergoing a substantial transformation driven by automation and artificial intelligence (AI). Traditional farming practices, which have relied heavily on manual labour and intuition, are increasingly \textbf{augmented with data-driven decision-making and autonomous systems} designed to improve efficiency, productivity, and sustainability \citep{Reina2024, AIReview2025}.
+
+At the core of this transformation is \textbf{precision agriculture}, a modern farming paradigm that applies advanced technologies to manage temporal and spatial variability in crops and resources. Precision agriculture seeks to optimize inputs (such as water, fertilizers, and pesticides) and outputs (such as crop yield and quality) by leveraging real-time data collected through sensors, imaging platforms, and connected devices \citep{Springer2025, Reina2024}. Automation and AI are central enablers of this approach, facilitating tasks that were previously labour-intensive and error-prone.
+
+\textbf{Automation technologies} in agriculture range from semi-autonomous machinery (such as GPS-assisted tractors) to fully autonomous robots capable of performing tasks like seeding, weeding, and harvesting. Agricultural robotics, often integrated with AI systems, enable consistent, repeatable operations with minimal human intervention. For instance, robots use computer vision and deep learning to differentiate between crops and weeds, reducing the need for blanket chemical applications and minimizing environmental impact \citep{Comparetti2025, Reina2024}.
+
+The integration of automation and AI also contributes to longer-term sustainability goals. By enabling more precise resource management and reducing waste, these technologies help lower environmental footprints associated with farming. Automated irrigation systems, for example, can conserve water by adjusting delivery based on soil moisture patterns and plant needs predicted by AI models. Likewise, autonomous machinery can reduce fuel usage and emissions compared to traditional heavy equipment operating without optimization \citep{Springer2025, AIReview2025}.
+
+Despite their promise, these technologies face challenges related to \textbf{high implementation costs, technical accessibility, data privacy, and infrastructure requirements}—especially for smallholder and resource-limited farms. Additionally, issues such as model generalization across diverse crops and regions, energy constraints in autonomous platforms, and the need for explainable AI remain active areas of research and development \citep{AIReview2025, MDPI2025}.
+
+\section{Overview of Agricultural Robotics}
+
+Contemporary farming encounters a pivotal intersection of worldwide issues, such as swift population increase, significant rural workforce deficits, and urgent ecological decline. To tackle these challenges,\textbf{ the agriculture industry is experiencing a significant digital shift fueled by the merging of Agricultural Robotics and Smart Farming (Agriculture 4.0). These self-operating systems integrate specialized mechanical components, sophisticated computer vision, and artificial intelligence to perform intricate tasks that have typically relied on human work.} In contrast to typical heavy machinery, robots adjust flexibly to the chaotic and uncertain qualities of biological settings.by transitioning to automated processes, these systems provide a scalable approach to enhancing global food security.\citep{1}
+
+Perception, decision-making, and execution are the three main domains on which agricultural robots' technological architecture is based. Robots use a variety of advanced sensors, such as RGB cameras, LiDAR, and RTK-GPS, to sense their environment and determine centimeter-level localization. \textbf{This raw sensor data is then processed in real time by artificial intelligence and deep learning architectures, like Convolutional Neural Networks, to map weeds, identify crops, or identify diseases.} Lastly, soft-gripping robotic manipulators and specialized mechanical actuators engage with the physical world to carry out tasks accurately. Platforms can carry out delicate tasks thanks to this continuous loop without endangering plants or upsetting soil structures.\cite{3}
+
+These sophisticated robotic platforms, which are mainly made up of ground vehicles, manipulators, and aerial drones, \textbf {can be broadly classified by their operational environments. Unmanned Ground Vehicles are used for targeted chemical spraying and ongoing crop monitoring in open fields or orchards.} To reduce reliance on seasonal labor, specialized harvesting robots use multi-degree-of-freedom robotic arms to gently pick crops and identify ripe produce. In the meantime, unmanned aerial vehicles use multi-spectral payloads to map water stress and measure chlorophyll levels while surveying large areas from above. These various robotic form factors come together to form a multi-layered automated farm management ecosystem.
+
+Agricultural robotics have enormous potential, but there are currently a number of major obstacles preventing their widespread commercial adoption globally.\textbf{ Natural settings pose significant difficulties because of the constant deterioration of sensor reliability caused by varying outdoor lighting, mud, thick dust, and uneven terrain.} Furthermore, it takes a lot of processing power to run sophisticated computer vision models in real time, necessitating continuous research into low-power edge computing. A clear socioeconomic barrier to technology adoption is created by high upfront capital investment, which also limits access for small-scale farmers. Finally, before fully autonomous fleets can function safely, industry-wide communication frameworks and standardized safety procedures must develop.\cite{SCPE:Hassan:2017:IPA}
+
+From traditional, uniform field management to highly localized precision farming, agricultural robotics signifies a fundamental paradigm shift. These technologies optimize finite natural resources like water and significantly reduce chemical inputs by automating labor-intensive processes. In addition to reducing growers' overall operational costs, this shift lessens the significant environmental impact of contemporary industrial farming. \textbf{Robotic systems will become essential tools as research improves edge-AI efficiency, sensor durability, and mechanical dexterity.} The sustainability and resilience of global food production networks will ultimately depend on how this field develops.\citep{premier2026aidriven}
+
+\section{Artificial Intelligence in Agriculture}
+
+\subsection{Background and Challenges}
+
+The agriculture sector faces significant challenges in meeting the demands of a rapidly growing global population. Major issues include inadequate soil management, pest and disease infestations, low productivity, the need to process large volumes of data, and a substantial knowledge gap between traditional farming practices and modern technological solutions \cite{FAO2021, Wolfert2017}. These constraints directly affect crop yields and pose risks to global food security.
+
+Artificial Intelligence (AI) has emerged as a transformative technology capable of addressing these challenges. Its ability to process complex datasets, identify patterns, and support automated decision-making makes it a key enabler for modernizing agricultural systems \cite{Liakos2018}.
+
+\subsection{Applications of AI in Agriculture}
+
+AI applications in agriculture cover several critical management areas, including soil management, crop monitoring, and weed and disease control. Through machine learning algorithms and data-driven approaches, AI provides farmers with advanced analytical tools for making informed decisions \cite{Kamilaris2018}.
+
+For example, AI systems can analyze soil and environmental data to recommend optimal planting strategies. In crop management, predictive models help monitor plant growth and detect anomalies, allowing timely and precise interventions.
+
+\subsection{Disease Detection and Automation}
+
+A prominent application of AI is plant disease detection using image classification techniques. Computer vision models enable rapid identification of diseases from plant images, facilitating early intervention \cite{Mohanty2016}. This approach reduces crop losses and ensures more efficient use of agrochemicals, minimizing environmental impact.
+
+In addition, AI-driven automation supports a wide range of agricultural operations, including precision irrigation, automated spraying, and yield prediction. These systems improve operational efficiency and reduce reliance on manual labor.
+
+\subsection{Advanced AI Techniques}
+
+Advanced AI models such as Convolutional Neural Networks (CNNs) and Long Short-Term Memory (LSTM) networks play a critical role in agricultural applications. CNNs are particularly effective for image-based tasks, where feature extraction is performed through convolution operations:
+
+\[
+y_{i,j} = \sum_{m}\sum_{n} x_{i+m,j+n} \cdot w_{m,n}
+\]
+
+where \(x\) represents the input image and \(w\) denotes the convolution kernel.
+
+LSTM networks are designed for time-series analysis and are widely used in predictive modeling. Their core mechanism involves memory cells that retain information over time:
+
+\[
+h_t = f(W \cdot x_t + U \cdot h_{t-1} + b)
+\]
+
+where \(h_t\) is the hidden state, \(x_t\) is the input, and \(W, U, b\) are model parameters.
+
+These models enable accurate forecasting of crop yields, weather patterns, and resource requirements.
+
+\subsection{Sustainability and Future Directions}
+
+The integration of AI enhances agricultural sustainability by optimizing resource utilization and reducing chemical inputs \cite{Talaviya2020}. Beyond field-level applications, AI contributes to advancements in plant breeding, logistics, packaging, and supply chain management.
+
+These developments help reduce post-harvest losses, improve distribution efficiency, and support environmentally sustainable farming practices. As AI technologies continue to evolve, their role in agriculture is expected to expand, offering new opportunities to improve productivity and ensure long-term food security.
+
+\section{Motivation and Problem Statement}
+
+\subsection{Motivation}
+
+The increasing demand for agricultural productivity, combined with labor shortages and rising operational costs, has intensified the need for efficient and scalable farming solutions. Pesticide spraying, a critical task in crop protection, is still predominantly performed manually in many regions. This exposes farmers to hazardous chemicals, introduces variability in application, and reduces overall efficiency.
+
+Moreover, conventional spraying methods often result in excessive pesticide usage due to non-uniform distribution and lack of targeting. This leads to higher production costs, environmental pollution, and potential degradation of soil and water resources.
+
+Recent developments in robotics and intelligent systems provide a viable pathway to address these limitations. Autonomous agricultural robots can execute repetitive tasks with high precision and consistency, while reducing human intervention. A robotic spraying system, in particular, can improve application accuracy, optimize chemical usage, and enhance operator safety.
+
+\subsection{Problem Statement}
+
+Despite technological progress in precision agriculture, existing pesticide spraying solutions remain limited in terms of adaptability, precision, and affordability. Many systems rely on uniform spraying techniques that do not account for spatial variability in crop conditions or pest distribution.
+
+This project addresses the problem of designing and developing an autonomous robotic system for pesticide spraying that is both efficient and practical for real-world agricultural use. The key challenges include:
+
+\begin{itemize}
+    \item Achieving precise and controlled pesticide application to avoid overuse and underuse.
+    \item Ensuring reliable navigation and operation in unstructured agricultural environments.
+    \item Reducing human exposure to toxic chemicals through automation.
+    \item Balancing system performance with cost constraints to ensure accessibility for small and medium-scale farms.
+\end{itemize}
+
+The proposed system aims to integrate mobility, spraying mechanisms, and control intelligence into a unified platform capable of operating under real field conditions.
+
+\subsection{Objectives and Evaluation Criteria}
+
+The main objective of this project is to design, implement, and evaluate a robotic system for pesticide spraying that enhances precision, safety, and operational efficiency.
+
+To ensure a rigorous assessment, the project is guided by the following specific objectives and measurable criteria:
+
+\begin{itemize}
+    \item Develop a mobile robotic platform capable of stable navigation; evaluated by path tracking accuracy and obstacle avoidance success rate.
+    \item Design a controlled spraying system; evaluated by spray distribution uniformity and reduction in pesticide consumption.
+    \item Implement autonomous or semi-autonomous control; evaluated by task completion time and level of human intervention required.
+    \item Assess overall system performance; evaluated through efficiency metrics such as coverage rate, resource utilization, and operational cost.
+\end{itemize}
+
+\section{Project Context: Review of Phase 1}
+\section{Integration Challenges in Agricultural Robotic Systems}
+\section{Objectives of the Current Phase}0
