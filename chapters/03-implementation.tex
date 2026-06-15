@@ -1,5 +1,3 @@
-\chapter{Implementation}
-
 % ------------------------------------------------------------
 \chapter{Implementation}
 % ------------------------------------------------------------
@@ -62,7 +60,7 @@ is examined in detail in Section~\ref{sec:dep_challenges}.
 The embedded hardware used in this project consists of three physical
 components, each serving a distinct role in the prototype system.
  
-\paragraph{Raspberry Pi 3 Model B+.}
+\paragraph{Raspberry Pi 3 Model B.}
 The Raspberry Pi 3B+ is the central processing unit of the embedded
 system. It features a 1.4\,GHz quad-core ARM Cortex-A53 processor,
 1\,GB of LPDDR2 RAM, integrated 802.11ac dual-band Wi-Fi, and a
@@ -79,7 +77,7 @@ running at 16\,MHz with 2\,KB of SRAM and 32\,KB of flash
 storage~\cite{monk2016electronics}. It is responsible exclusively for
 low-level actuator control: receiving UART commands from the Raspberry
 Pi and generating the PWM signals required by motor drivers and relay
-circuits. Its limited resources are well-matched to this role — the
+circuits. Its limited resources are well-matched to this role — the hi
 firmware is small and its execution timing is deterministic.
  
 \paragraph{Raspberry Pi Camera Module 3.}
@@ -238,29 +236,953 @@ the architectural decision to separate the inference interface from its
 implementation meant that switching from local to remote execution
 required no changes to the surrounding software stack.
  
-Table~\ref{tab:inference_stages} summarises the three stages of the
-investigation and their outcomes.
- 
+
+\section{AI Model Deployment and Evaluation}
+\label{sec:model_deployment}
+
+This section addresses one of the central challenges of the project:
+deploying an RF-DETR Nano object detection model onto a
+resource-constrained embedded device. The deployment process involved
+evaluating multiple model formats, executing a multi-stage conversion
+pipeline, and navigating a series of hardware and runtime
+compatibility issues that ultimately determined the final system
+architecture. Because these decisions directly affect the system's
+ability to fulfil its core purpose — real-time pest detection in the
+field — this section is among the most significant in the chapter.
+
+% ............................................................
+\subsection{Original Detection Model}
+\label{sec:original_model}
+% ............................................................
+
+The object detection model used in this project was inherited from
+Phase~1 of the work, in which an RF-DETR Nano model was trained on a
+labelled agricultural pest dataset. RF-DETR Nano is a transformer-based
+real-time detector built on a DINOv2 vision transformer backbone and a
+DETR-style encoder–decoder head, as described in
+Section~\ref{sec:rfdetr}. The model was delivered in its native
+Roboflow RF-DETR checkpoint format — a PyTorch \texttt{.pt} weight
+file paired with the \texttt{rfdetr} Python package for inference.
+
+While this format is convenient for experimentation and retraining on
+a workstation, it is not suitable for direct embedded deployment for
+two reasons. First, PyTorch carries a large runtime footprint that
+exceeds the available memory of the Raspberry Pi 3B+ during model
+loading. Second, the PyTorch inference path does not take advantage of
+hardware-level optimisations available through dedicated inference
+runtimes. Format conversion was therefore a necessary precondition for
+any embedded deployment attempt.
+
+% ............................................................
+\subsection{Quantization and Precision Formats}
+\label{sec:quant_formats}
+% ............................................................
+
+Quantization reduces the numerical precision of a model's weights and
+activations, lowering memory consumption and accelerating inference on
+hardware that handles low-precision arithmetic efficiently. Four
+precision configurations were considered during this project, each
+representing a different point on the accuracy-versus-efficiency
+trade-off curve (quantization theory was introduced in
+Section~\ref{sec:quantization}; this section focuses on their
+practical implications for deployment).
+
+\paragraph{FP32 — Baseline.}
+Full 32-bit IEEE~754 floating-point is the default training precision.
+Every weight and activation is stored as a 4-byte value, giving the
+widest dynamic range and the highest numerical fidelity. On the
+Raspberry Pi 3B+'s Cortex-A53, FP32 arithmetic is supported in
+hardware via the ARM NEON SIMD unit, but without a dedicated neural
+accelerator each multiply-accumulate operation still occupies a general
+purpose pipeline stage. FP32 was used as the accuracy baseline against
+which all quantized variants were compared.
+
+\paragraph{FP16 — Half Precision.}
+FP16 halves the storage requirement of each parameter (2~bytes) and
+can double effective memory bandwidth. On server-class GPUs with
+native FP16 tensor cores it also halves arithmetic latency. However,
+the standard \texttt{tflite\_runtime} distributed for ARM CPUs does
+\emph{not} include FP16 CPU kernels. Attempting to run an FP16 TFLite
+model on the Raspberry Pi produces runtime errors for operators such
+as \texttt{FlexErf} and \texttt{DEQUANTIZE}, which are absent from
+the ARM build of the interpreter. FP16 was therefore excluded from
+the embedded deployment path despite its theoretical appeal.
+
+\paragraph{INT8 — Static Integer Quantization.}
+INT8 maps each floating-point value to a signed 8-bit integer in
+$[-128,\,127]$ using a per-layer \emph{scale} and \emph{zero-point}
+derived from a calibration dataset. The result is a $4\times$ reduction
+in model size compared to FP32 and significantly faster inference on
+processors with integer multiply-accumulate units. Full static INT8
+quantization requires a representative calibration set and full
+TensorFlow (not just \texttt{tflite\_runtime}) to run the
+\texttt{TFLiteConverter} pipeline — a dependency that proved
+problematic on the embedded device.
+
+\paragraph{Dynamic Range INT8 — Post-Training Quantization.}
+Dynamic range quantization quantizes model \emph{weights} to INT8
+offline but leaves \emph{activations} in floating-point, quantizing
+them dynamically at inference time. No calibration dataset is required,
+making it the simplest form of quantization to apply. It was evaluated
+as the most accessible path to a smaller model footprint while
+minimising conversion complexity. The \texttt{tf.lite.Optimize.DEFAULT}
+flag in \texttt{TFLiteConverter} enables this mode.
+
+% ............................................................
+\subsection{Neural Network Operators (Ops)}
+\label{sec:ops}
+% ............................................................
+
+A neural network is represented internally as a \emph{computational
+graph}: a directed acyclic graph (DAG) in which each node is an
+\textbf{operator} (op) and the edges are tensors flowing between
+them~\cite{abadi2016tensorflow}. Every mathematical operation in the
+network — a 2-D convolution, a matrix multiplication, a softmax
+normalisation, a layer normalisation, a GELU activation — corresponds
+to one or more op nodes in this graph.
+
+An inference runtime executes a model by traversing this graph and
+dispatching each op to a hardware-specific \emph{kernel}
+implementation. A runtime only supports the ops for which it provides
+kernels. If a model's graph contains an op that has no kernel in the
+target runtime, the runtime cannot execute the model and raises an
+\emph{unsupported operator} error at load time.
+
+This constraint is particularly acute for transformer-based models
+such as RF-DETR Nano. Unlike CNN-based detectors whose graphs consist
+almost entirely of convolution and pooling ops (which every major
+runtime supports), RF-DETR's DINOv2 backbone and DETR decoder rely on
+operations including:
+
+\begin{itemize}
+    \item Multi-head self-attention and cross-attention
+    \item Layer normalisation with learned affine parameters
+    \item GELU (Gaussian Error Linear Unit) activation
+    \item Custom position encoding operations
+    \item Deformable attention (in the DETR decoder)
+\end{itemize}
+
+Several of these operations are not part of the \emph{standard}
+TFLite operator set (the \texttt{TFLITE\_BUILTINS} kernel library).
+They exist in TFLite only as \textbf{Flex ops} (also called Select
+ops) — a mechanism that embeds a subset of the full TensorFlow runtime
+inside the TFLite interpreter to handle non-standard
+ops~\cite{david2021tensorflow}. However, the Flex delegate requires
+linking against a much larger library (\texttt{libtensorflow.so}),
+which is not included in the standard \texttt{tflite\_runtime} wheel
+distributed for ARM devices. This mismatch between the ops required by
+RF-DETR and the ops available in the lightweight ARM TFLite build is
+the fundamental technical blocker described in
+Section~\ref{sec:dep_challenges_detail}.
+
+% ............................................................
+\subsection{Model Conversion Pipeline}
+\label{sec:conversion_pipeline}
+% ............................................................
+
+The conversion pipeline proceeded in two stages: first from the native
+RF-DETR PyTorch checkpoint to ONNX, and then from ONNX to TFLite.
+
+\subsubsection{Stage 1 — RF-DETR to ONNX}
+
+Export from RF-DETR to ONNX is natively supported by the Roboflow
+\texttt{rfdetr} Python package. The model's \texttt{export()} method
+invokes \texttt{torch.onnx.export} internally, tracing the PyTorch
+computation graph and serialising it to a self-contained
+\texttt{.onnx} file. The export process is straightforward and
+requires only the pretrained weights path and the number of detection
+classes:
+
+\begin{lstlisting}[language=Python,
+                   caption={RF-DETR Nano export to ONNX format.},
+                   label={lst:rfdetr_export}]
+from rfdetr import RFDETRNano
+
+model = RFDETRNano(
+    pretrain_weights="path/to/weights.pt",
+    num_classes=NUM_CLASSES
+)
+
+model.export(output_dir="path/to/models")
+\end{lstlisting}
+
+The resulting \texttt{.onnx} file contains the full computational
+graph with FP32 weights and is immediately usable with ONNX Runtime
+on x86-64 hardware.
+
+\subsubsection{Stage 2 — ONNX to TFLite}
+
+Because RF-DETR provides no direct TFLite export path, conversion from
+ONNX to TFLite was performed using the \texttt{onnx2tf} library, which
+translates an ONNX graph into a TensorFlow SavedModel and then invokes
+\texttt{TFLiteConverter} to produce the final \texttt{.tflite} file.
+
+Two \texttt{onnx2tf} options required careful configuration to avoid
+generating models with unsupported operators on the target runtime:
+
+\begin{lstlisting}[language=Python,
+                   caption={ONNX to TFLite conversion using onnx2tf.},
+                   label={lst:onnx2tf}]
+import onnx2tf
+
+onnx2tf.convert(
+    input_onnx_file_path=onnx_path,
+    output_folder_path=output_dir,
+    output_integer_quantized_tflite=False,
+    output_float16_quant_tflite=False
+)
+\end{lstlisting}
+
+\begin{itemize}
+    \item \texttt{output\_integer\_quantized\_tflite=False} — Prevents
+          \texttt{onnx2tf} from applying its own integer quantization
+          pass, which can introduce operator patterns that require the
+          Flex delegate. Disabling this flag produces a clean FP32
+          graph that can be quantized separately in a controlled
+          manner.
+
+    \item \texttt{output\_float16\_quant\_tflite=False} — Prevents
+          generation of an FP16 model. As established in
+          Section~\ref{sec:quant_formats}, the standard
+          \texttt{tflite\_runtime} for ARM does not include FP16 CPU
+          kernels; an FP16 model would fail at runtime with
+          \texttt{FlexErf} and \texttt{DEQUANTIZE} errors. This flag
+          is critical for producing a model that can be executed
+          without the Flex delegate.
+\end{itemize}
+
+An optional dynamic-range INT8 quantization step was applied after
+the initial FP32 conversion using TensorFlow's \texttt{TFLiteConverter}
+directly:
+
+\begin{lstlisting}[language=Python,
+                   caption={Optional dynamic-range INT8 quantization
+                            via TFLiteConverter.},
+                   label={lst:int8_quant}]
+import tensorflow as tf
+
+converter = tf.lite.TFLiteConverter.from_saved_model(saved_model_dir)
+converter.optimizations = [tf.lite.Optimize.DEFAULT]
+converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS]
+tflite_model = converter.convert()
+\end{lstlisting}
+
+Setting \texttt{supported\_ops} to \texttt{TFLITE\_BUILTINS} alone is
+the key constraint: it explicitly forbids the converter from emitting
+Flex ops for any operation that cannot be expressed in the built-in
+operator set. If a subgraph cannot be represented without Flex ops,
+the converter raises an error rather than silently producing a model
+that will fail on a standard \texttt{tflite\_runtime}. This flag
+therefore functions as an early compatibility check.
+
+% ............................................................
+\subsection{Deployment Challenges and Resolution}
+\label{sec:dep_challenges_detail}
+% ............................................................
+
+Despite the careful operator configuration applied during conversion,
+the resulting TFLite models failed to load on the Raspberry Pi 3B+.
+This section documents the specific failure modes encountered and the
+reasoning behind the final architectural decision.
+
+\subsubsection{Unsupported Operator Errors}
+
+The core issue is that RF-DETR Nano's computational graph, even after
+conversion, contains operator patterns that fall outside the
+\texttt{TFLITE\_BUILTINS} operator set. The DETR decoder's
+deformable attention mechanism and the DINOv2 backbone's layer
+normalisation variants are expressed, after ONNX graph tracing, as
+composite subgraphs whose constituent ops are not individually
+supported by the ARM \texttt{tflite\_runtime} kernel library.
+
+The \texttt{TFLITE\_BUILTINS} constraint in Listing~\ref{lst:int8_quant}
+caused \texttt{TFLiteConverter} to raise conversion errors for these
+subgraphs, confirming the incompatibility before runtime. Relaxing
+the constraint to permit Flex ops (\texttt{SELECT\_TF\_OPS}) produced
+a loadable \texttt{.tflite} file, but that file requires the Flex
+delegate library (\texttt{libtensorflow\_lite\_c.so}), which is not
+bundled with any \texttt{tflite\_runtime} wheel available for
+Python on \texttt{aarch64}.
+
+\subsubsection{Python Runtime Compatibility Conflict}
+
+A \texttt{tflite\_runtime} wheel compatible with the device's
+\texttt{aarch64} architecture was identified for an older Python
+version (3.11). Switching to this runtime resolved the TFLite
+installation issue but introduced a conflict with system-level
+packages: the \texttt{picamera2} library and the system OpenCV
+installation are compiled against the system Python (3.13) and cannot
+be imported from a different interpreter. Custom bridging code was
+prototyped to transfer frames between the two runtimes via shared
+memory, but this approach added fragility and latency that were
+inconsistent with the real-time requirements of the system.
+
+\subsubsection{Resource Constraints}
+
+Beyond operator compatibility, the Raspberry Pi 3B+ imposes hard
+resource constraints that any embedded inference solution must satisfy:
+
+\begin{itemize}
+    \item \textbf{Memory.} The RF-DETR Nano model in FP32 requires
+          approximately 100--200\,MB for weights alone; combined with
+          the operating system, the camera pipeline, and the
+          communication stack, total RAM usage approaches the 1\,GB
+          ceiling of the device.
+
+    \item \textbf{Compute.} The attention mechanism in the DETR decoder
+          has quadratic complexity with respect to the number of
+          spatial tokens, making it significantly more expensive per
+          frame than a comparable CNN-based detector on a processor
+          without matrix multiplication hardware.
+\end{itemize}
+
+\subsubsection{Resolution — Remote Inference Architecture}
+
+After exhausting the available embedded runtime options, the decision
+was made to adopt the remote inference fallback path that had been
+built into the architecture from the outset
+(Section~\ref{sec:inference_pipeline}). Under this configuration,
+the Raspberry Pi streams compressed frames to the backend server over
+the WebSocket channel; ONNX Runtime on the server's x86-64 CPU
+executes inference and returns structured detection results
+(bounding boxes, class labels, confidence scores) to the Pi.
+
+This resolution carries no operator-support constraints — ONNX Runtime
+on x86-64 supports the complete RF-DETR operator set natively —
+and places no additional compute or memory burden on the embedded
+device. The Raspberry Pi's role is reduced to frame acquisition,
+compression, and transmission, tasks that are well within its
+capabilities.
+
+Critically, the architectural separation between the inference
+interface and its implementation (Section~\ref{sec:software}) meant
+that this change required no modification to the surrounding software
+stack: the Inference Service simply selects the remote execution
+provider at startup rather than a local one.
+
+Table~\ref{tab:deployment_stages} provides a consolidated summary of
+all deployment approaches evaluated, their specific failure modes,
+and their outcomes.
+
 \begin{table}[h]
 \centering
-\caption{Summary of embedded inference deployment investigation.}
-\label{tab:inference_stages}
-\begin{tabular}{p{3cm} p{4.5cm} p{4.5cm}}
+\caption{Summary of model deployment approaches and outcomes.}
+\label{tab:deployment_stages}
+\begin{tabular}{p{3.2cm} p{4.2cm} p{4.2cm}}
 \hline
-\textbf{Approach} & \textbf{Blocker} & \textbf{Outcome} \\
+\textbf{Approach} & \textbf{Failure Mode} & \textbf{Outcome} \\
 \hline
-Direct PyTorch (RF-DETR native) &
-    Compute and memory exceed Pi 3B+ capacity &
+PyTorch inference (native RF-DETR) &
+    Memory and compute exceed Pi 3B+ capacity &
     Abandoned \\
 ONNX Runtime on Pi &
-    No compatible wheel for Python 3.13 / \texttt{aarch64}; source build exceeds device RAM &
+    No compatible \texttt{aarch64} wheel for Python 3.13; source build exceeds device RAM &
     Abandoned \\
-TFLite via ONNX conversion &
-    RF-DETR custom operators unsupported by TFLite runtime; Python runtime conflict with system OpenCV &
+TFLite FP32 (TFLITE\_BUILTINS) &
+    RF-DETR ops outside built-in set; converter raises unsupported op error &
     Abandoned \\
-Remote inference (server ONNX Runtime) &
+TFLite with Flex delegate &
+    Flex delegate library absent from ARM \texttt{tflite\_runtime} wheel &
+    Abandoned \\
+TFLite on Python 3.11 runtime &
+    Conflicts with system \texttt{picamera2} and OpenCV bindings &
+    Abandoned \\
+Remote inference via ONNX Runtime (server) &
     None &
     \textbf{Adopted} \\
 \hline
 \end{tabular}
 \end{table}
+
+% ============================================================
+%  Chapter 4 – Section 4.4
+%  Arduino Firmware Implementation
+% ============================================================
+
+% ------------------------------------------------------------
+\section{Arduino Firmware Implementation}
+\label{sec:arduino_firmware}
+% ------------------------------------------------------------
+
+This section documents the implementation of the Arduino Uno firmware
+that controls the robot's actuation hardware. As established in the
+architectural design (Section~\ref{sec:software}), the Arduino operates
+as a serial-controlled actuator node: it accepts high-level text
+commands from the Raspberry Pi, translates them into hardware signals,
+and enforces safety constraints autonomously without relying on the
+host system. The firmware is written in C++ using the Arduino framework
+and is structured into four functional modules that mirror the
+architecture defined in Section~\ref{sec:software}.
+
+% ............................................................
+\subsection{Firmware Structure}
+\label{sec:firmware_structure}
+% ............................................................
+
+The firmware manages three motor driver circuits controlling a total
+of five motors: four DC motors for differential drive mobility (two
+per driver board) and one pump motor for pesticide delivery. The
+physical pin assignment is fixed at compile time and documented in
+Table~\ref{tab:pin_map}.
+
+\begin{table}[h]
+\centering
+\caption{Arduino Uno pin assignment for motor and pump control.}
+\label{tab:pin_map}
+\begin{tabular}{llll}
+\hline
+\textbf{Motor} & \textbf{Driver} & \textbf{Speed (PWM)} & \textbf{Direction Pins} \\
+\hline
+Motor 0 & Driver 1 & Pin 3  & A0 (IN1), A1 (IN2) \\
+Motor 1 & Driver 1 & Pin 5  & A2 (IN3), A3 (IN4) \\
+Motor 2 & Driver 2 & Pin 6  & A4 (IN1), A5 (IN2) \\
+Motor 3 & Driver 2 & Pin 9  & Pin 2 (IN3), Pin 4 (IN4) \\
+Pump    & Driver 3 & Pin 10 & Pin 7 (direction) \\
+\hline
+\end{tabular}
+\end{table}
+
+Analogue pins (A0--A5) are configured as digital outputs using
+\texttt{pinMode}, a standard Arduino technique that reclaims analogue
+input pins for general digital I/O when the analogue-to-digital
+converter is not required~\cite{monk2016electronics}.
+
+The firmware is organised into four modules, each implemented as a
+logical code section with clearly delineated responsibilities:
+
+\begin{itemize}
+    \item \textbf{Pin Initialisation} — configures all output pins
+          and sets every actuator to a safe idle state at startup.
+    \item \textbf{Actuator Control Layer} — provides \texttt{setMotor}
+          and \texttt{setPump} functions that encapsulate all
+          hardware signal generation.
+    \item \textbf{Command Processor} — reads, parses, and dispatches
+          newline-terminated ASCII commands received over UART.
+    \item \textbf{Failsafe Monitor} — checks for communication
+          timeout and triggers an emergency stop when necessary.
+\end{itemize}
+
+The \texttt{setup()} function initialises the serial port at 9600~baud,
+calls \texttt{initializePins()}, invokes \texttt{safeStop()} to
+guarantee a known-idle hardware state, and records the startup
+timestamp for the failsafe clock. The \texttt{loop()} function runs
+two tasks on every iteration: it services incoming serial bytes
+(non-blocking) and calls \texttt{checkFailsafe()} to evaluate the
+communication timeout condition.
+
+\bigskip
+\noindent\textbf{[DIAGRAM 1 — Firmware Module Diagram]}\\
+\textit{Four stacked boxes: Command Processor (top, receives UART
+bytes from left), Actuator Control Layer (middle, drives PWM/GPIO
+signals to the right toward motor driver ICs), Pin Initialisation
+(bottom, runs once at startup). The Failsafe Monitor sits as a side
+module with a monitoring arrow pointing into the Actuator Control
+Layer. Annotate the UART input with baud rate (9600) and newline
+delimiter. Place after this subsection.}
+\bigskip
+
+% ............................................................
+\subsection{Serial Communication Protocol}
+\label{sec:serial_protocol}
+% ............................................................
+
+Communication between the Raspberry Pi and the Arduino uses a
+lightweight, human-readable ASCII protocol over UART at 9600~baud.
+Commands are plain text strings terminated by a newline character
+(\texttt{\textbackslash n}); carriage return characters
+(\texttt{\textbackslash r}) are silently discarded to ensure
+compatibility with both Unix and Windows line endings. Each command
+fits within a 64-byte buffer, a constraint that bounds memory usage
+on the ATmega328P's 2\,KB SRAM~\cite{atmel2015atmega328p}.
+
+\subsubsection{Command Format}
+
+The firmware supports six commands, summarised in
+Table~\ref{tab:commands}. Commands are matched case-insensitively
+using \texttt{strcasecmp} and \texttt{strncasecmp}, making the
+protocol tolerant of capitalisation variations from the host.
+
+\begin{table}[h]
+\centering
+\caption{Arduino serial command set.}
+\label{tab:commands}
+\begin{tabular}{p{4.5cm} p{3cm} p{4.5cm}}
+\hline
+\textbf{Command} & \textbf{Parameters} & \textbf{Description} \\
+\hline
+\texttt{PING}                       & None                         & Connectivity check \\
+\texttt{CHECK}                      & None                         & Motor subsystem health check \\
+\texttt{STOP\_ALL} / \texttt{STOP}  & None                         & Emergency stop all actuators \\
+\texttt{GET\_STATUS}                & None                         & Report all actuator states \\
+\texttt{SET\_MOTOR <id> <spd> <dir>} & id: 0--3 or P; spd: 0--255; dir: 0/1 & Set motor or pump speed and direction \\
+\texttt{SET\_PUMP <spd> <dir>}      & spd: 0--255; dir: 0/1        & Set pump speed and direction \\
+\hline
+\end{tabular}
+\end{table}
+
+\noindent The \texttt{SET\_MOTOR} command accepts a motor identifier
+of \texttt{0}--\texttt{3} for the four drive motors or \texttt{P}
+for the pump, unifying motor and pump control under a single command
+verb. Speed is an unsigned 8-bit integer (0--255) mapped directly to
+the PWM duty cycle via \texttt{analogWrite}; direction is a binary
+flag where \texttt{1} denotes forward and \texttt{0} denotes
+reverse~\cite{monk2016electronics}.
+
+Any command that cannot be parsed is treated as an unknown command:
+\texttt{safeStop()} is called immediately and an
+\texttt{ERROR:UNKNOWN\_COMMAND} response is returned. This
+fail-on-unknown design ensures that a corrupted or malformed message
+does not leave actuators in an undefined state~\cite{kopetz2011real}.
+
+\subsubsection{Response Format}
+
+The firmware always responds to every command with a newline-terminated
+ASCII string, enabling the Raspberry Pi's Communication Service to
+detect missing acknowledgements within a timeout window. Four response
+types are defined:
+
+\begin{itemize}
+    \item \texttt{PONG} — response to \texttt{PING}; confirms
+          the serial link is alive.
+    \item \texttt{MOTORS\_OK} — response to \texttt{CHECK}; confirms
+          the firmware is initialised and ready.
+    \item \texttt{OK} — confirms successful execution of a
+          \texttt{SET\_MOTOR}, \texttt{SET\_PUMP}, or
+          \texttt{STOP\_ALL} command.
+    \item \texttt{STATUS:<m0spd>,<m0dir>,...,<pumpspd>,<pumpdir>}
+          — a comma-separated string reporting the speed and direction
+          of all five actuators in response to \texttt{GET\_STATUS}.
+    \item \texttt{ERROR:<reason>} — reports a validation failure or
+          safety event. Defined error codes are listed in
+          Table~\ref{tab:errors}.
+\end{itemize}
+
+\begin{table}[h]
+\centering
+\caption{Firmware error response codes.}
+\label{tab:errors}
+\begin{tabular}{ll}
+\hline
+\textbf{Error Code} & \textbf{Cause} \\
+\hline
+\texttt{ERROR:UNKNOWN\_COMMAND}      & Command not recognised \\
+\texttt{ERROR:INVALID\_MOTOR\_ID}   & Motor ID outside range 0--3 \\
+\texttt{ERROR:INVALID\_MOTOR\_PARAMS} & Malformed speed/direction arguments \\
+\texttt{ERROR:INVALID\_PUMP\_PARAMS} & Malformed pump arguments \\
+\texttt{ERROR:CMD\_TOO\_LONG}        & Command exceeded 64-byte buffer \\
+\texttt{ERROR:FAILSAFE\_STOP}        & Communication timeout; actuators halted \\
+\hline
+\end{tabular}
+\end{table}
+
+% ............................................................
+\subsection{Actuator Control Layer}
+\label{sec:actuator_layer}
+% ............................................................
+
+The Actuator Control Layer provides two functions — \texttt{setMotor}
+and \texttt{setPump} — that form the only interface through which the
+rest of the firmware interacts with hardware. All direct pin
+manipulation is confined to these functions; no other module writes to
+PWM or GPIO registers.
+
+\subsubsection{Motor Control}
+
+Each DC motor is driven by an H-bridge motor driver IC. An H-bridge
+allows current to flow in either direction through the motor by
+selecting the appropriate transistor pair, thereby controlling rotation
+direction independently of speed~\cite{horowitz2015art}. The Arduino
+controls an H-bridge through three signals per motor:
+
+\begin{itemize}
+    \item \textbf{Two direction pins (IN1/IN2 or IN3/IN4).}
+          Setting IN1 HIGH and IN2 LOW drives the motor forward;
+          reversing the levels drives it backward. Setting both LOW
+          applies a passive brake.
+    \item \textbf{One PWM speed pin (ENA/ENB).}
+          \texttt{analogWrite(pin, speed)} outputs a PWM signal
+          whose duty cycle is proportional to \texttt{speed}/255,
+          regulating the average voltage — and therefore the torque
+          and rotational velocity — applied to the
+          motor~\cite{monk2016electronics}.
+\end{itemize}
+
+The \texttt{setMotor} function validates the motor identifier
+(rejecting values outside 0--3), clamps the speed to the range
+$[0, 255]$ using Arduino's \texttt{constrain()}, normalises the
+direction to a binary value, updates the corresponding \texttt{MotorState}
+struct, and then writes the computed pin levels. Storing state in the
+\texttt{MotorState} array allows \texttt{GET\_STATUS} to report
+current actuator conditions without querying hardware registers,
+which is not possible on the ATmega328P once a pin has been
+configured as output~\cite{atmel2015atmega328p}.
+
+\subsubsection{Pump Control}
+
+The pump motor is connected to a single-channel motor driver (Driver~3)
+that exposes one speed (PWM) pin and one direction pin, differing from
+the dual-IN-pin configuration used for the drive motors. The
+\texttt{setPump} function applies the same validation and clamping
+logic as \texttt{setMotor} and writes to \texttt{PUMP\_SPEED} and
+\texttt{PUMP\_DIRECTION} accordingly.
+
+\subsubsection{Safe Stop}
+
+The \texttt{safeStop()} function sets the PWM speed pin of every
+actuator to zero and drives all direction pins LOW. Writing zero to
+the PWM register cuts motor current immediately; driving both direction
+pins LOW simultaneously places the H-bridge in passive brake mode,
+preventing back-EMF from the decelerating motors from feeding voltage
+back into the direction pin outputs~\cite{horowitz2015art}. All
+\texttt{MotorState} structs are reset to reflect the idle condition.
+\texttt{safeStop()} is called unconditionally at startup, on any
+unknown command, on buffer overflow, and on failsafe timeout, ensuring
+that every error path leaves the hardware in a known safe state.
+
+% ............................................................
+\subsection{Safety Mechanisms}
+\label{sec:safety}
+% ............................................................
+
+\subsubsection{Heartbeat and Failsafe Timeout}
+
+The most critical safety feature of the firmware is its
+\emph{communication watchdog}, implemented in \texttt{checkFailsafe()}.
+The motivation for this mechanism is straightforward: if the Raspberry
+Pi crashes, its software hangs, or the USB cable is disconnected while
+motors are running, the Arduino has no way to receive a stop command.
+Without a watchdog, the motors would continue running indefinitely —
+a dangerous condition for a mobile robot carrying a pesticide
+reservoir~\cite{kopetz2011real}.
+
+The watchdog works as follows. Every time a valid command is received
+and processed, \texttt{last\_command\_timestamp} is updated to
+\texttt{millis()} — the Arduino's elapsed-time counter in
+milliseconds. On every iteration of \texttt{loop()},
+\texttt{checkFailsafe()} first checks whether any actuator is active
+(speed $>$ 0). If all actuators are already idle, the check returns
+immediately without resetting anything. If at least one actuator is
+active, it evaluates:
+
+\begin{equation}
+\texttt{millis()} - \texttt{last\_command\_timestamp} > T_{\text{failsafe}}
+\end{equation}
+
+\noindent where $T_{\text{failsafe}} = 6000$\,ms is the configured
+timeout. If the condition is true, \texttt{safeStop()} is called,
+\texttt{ERROR:FAILSAFE\_STOP} is sent over the serial link, and the
+timestamp is reset to prevent repeated triggering on subsequent
+loop iterations.
+
+The 6-second timeout is deliberately conservative: it is long enough
+that normal command cadence (control messages sent multiple times per
+second) never triggers a false positive, yet short enough that a
+connection loss results in a stop within a time frame that prevents
+significant unintended movement~\cite{kopetz2011real}.
+
+\subsubsection{Buffer Overflow Protection}
+
+The 64-byte command buffer is guarded against overflow: if an incoming
+byte arrives when \texttt{command\_index} has reached the buffer limit,
+the index is reset to zero, \texttt{safeStop()} is called, and
+\texttt{ERROR:CMD\_TOO\_LONG} is returned. This prevents a
+pathologically long or malformed transmission from corrupting the
+buffer or advancing into adjacent memory — important on a
+microcontroller with no memory protection unit
+(MPU)~\cite{atmel2015atmega328p}.
+
+\subsubsection{Unknown Command Handling}
+
+Any command string that does not match a known verb causes
+\texttt{safeStop()} to be called before the error response is sent.
+This \emph{safe-by-default} policy means that a software error on the
+Raspberry Pi that produces malformed output will halt the robot rather
+than leaving it in an undefined state, consistent with the fail-fast
+principle described in Section~\ref{sec:software}.
+
+\bigskip
+\noindent\textbf{[DIAGRAM 2 — Failsafe State Machine]}\\
+\textit{A simple two-state diagram: \textbf{Active} (one or more
+motors running) and \textbf{Idle} (all motors stopped). Transitions:
+Active $\to$ Idle on \texttt{STOP\_ALL} command, valid command
+timeout, unknown command, or buffer overflow; Idle $\to$ Active on
+\texttt{SET\_MOTOR}/\texttt{SET\_PUMP} with speed $>$ 0. Annotate
+the timeout transition with ``$\Delta t > 6000$\,ms $\Rightarrow$
+\texttt{ERROR:FAILSAFE\_STOP}''. Place after this subsection.}
+\bigskip
+
+% ============================================================
+%  Additional \bibitem entries
+% ============================================================
+%
+% \bibitem{atmel2015atmega328p}
+% Microchip Technology Inc.,
+% ``ATmega328P 8-bit AVR Microcontroller with 32K Bytes In-System
+% Programmable Flash Datasheet,''
+% document no.\ DS40001906C, 2015.
+%
+% (All other entries — monk2016electronics, horowitz2015art,
+%  kopetz2011real — are already listed in previous sections.)
+
+ 
+% ------------------------------------------------------------
+\section{Robot Software Implementation}
+\label{sec:robot_software}
+% ------------------------------------------------------------
+ 
+This section documents the implementation of the Raspberry Pi software
+stack introduced architecturally in Section~\ref{sec:software}. It
+covers the organisation of the codebase, the rationale behind
+structural decisions, and the implementation details of each major
+component. The software is written entirely in Python~3.13 and follows
+the layered, event-driven architecture described in
+Chapter~3, with each architectural layer mapping directly to one or
+more directories and modules in the project.
+ 
+% ............................................................
+\subsection{Project Structure}
+\label{sec:project_structure}
+% ............................................................
+ 
+The project is organised as a single Python package named
+\texttt{pest-detection-model-test}, managed with the \texttt{uv}
+package manager and declared via a \texttt{pyproject.toml} build
+manifest conforming to PEP~517~\cite{pep517}. Dependencies are pinned
+in a \texttt{uv.lock} lockfile to ensure reproducible installation
+across environments — a practice that proved essential when debugging
+the runtime compatibility issues described in
+Section~\ref{sec:dep_challenges}~\cite{pip2024}.
+ 
+The top-level directory layout is as follows:
+ 
+% \begin{verbatim}
+% pest-detection-model-test/
+% ├── app.py                  Main entry point
+% ├── configs.py              Centralised configuration constants
+% ├── config/                 Runtime-generated config files
+% │   └── wifi_credentials.json
+% ├── hardware/               Hardware abstraction layer
+% │   ├── arduino.py          Serial communication wrapper
+% │   └── motors.py           Motor control interface
+% ├── services/               Service layer modules
+% │   ├── asset_manager.py    Model file management
+% │   ├── camera_service.py   Frame acquisition
+% │   ├── health_service.py   Component health checks
+% │   ├── inference_backend.py Inference API abstraction
+% │   ├── model_service.py    Model loading and inference
+% │   ├── network_service.py  WebSocket communication
+% │   ├── watchdog_service.py Thread monitoring and recovery
+% │   ├── wifi_service.py     Wi-Fi and hotspot management
+% │   └── lifecycle_manager.py Shutdown callback registry
+% ├── states/
+% │   └── state_machine.py    FSM state definitions and transitions
+% ├── utils/
+% │   └── logger.py           Centralised logging setup
+% ├── models/                 Downloaded model assets (.onnx / .tflite)
+% ├── logs/                   Runtime log files
+% └── output/                 Detection results and screenshots
+% \end{verbatim}
+ 
+The structure is a direct implementation of the five-layer software
+architecture defined in Section~\ref{sec:software}. Table~\ref{tab:layer_map}
+maps each architectural layer to its corresponding directory and
+primary files in the codebase.
+ 
+\begin{table}[h]
+\centering
+\caption{Mapping of architectural layers to codebase components.}
+\label{tab:layer_map}
+\begin{tabular}{p{3cm} p{3.5cm} p{5cm}}
+\hline
+\textbf{Architectural Layer} & \textbf{Directory / File} & \textbf{Responsibility} \\
+\hline
+Application Layer   & \texttt{app.py}                 & Entry point; boots, wires, and runs the system \\
+State Management    & \texttt{states/}                & FSM state definitions and transition logic \\
+Services Layer      & \texttt{services/}              & Camera, inference, networking, health, watchdog \\
+Hardware Layer      & \texttt{hardware/}              & Arduino serial wrapper, motor interface \\
+Utility Layer       & \texttt{utils/}, \texttt{configs.py} & Logging, configuration, shared helpers \\
+\hline
+\end{tabular}
+\end{table}
+ 
+The following subsections describe the role and implementation of each
+component group in turn.
+ 
+\subsubsection{Application Entry Point — \texttt{app.py}}
+ 
+\texttt{app.py} is the sole entry point of the system, invoked with
+\texttt{python app.py}. It is responsible for the application
+lifecycle: initialising the logger, loading configuration from
+\texttt{configs.py}, instantiating all hardware drivers and service
+objects, injecting shared dependencies, and starting the main
+execution loop. On shutdown — whether triggered by a keyboard
+interrupt, a system command, or an unrecoverable fault — it calls the
+\texttt{LifecycleManager} to invoke all registered cleanup callbacks
+in reverse order, ensuring that the Arduino is commanded to idle and
+the WebSocket connection is closed before the process
+exits~\cite{gamma1994design}.
+ 
+The entry point deliberately contains no business logic. Its only
+purpose is to wire components together and hand control to the FSM.
+This keeps the start-up sequence readable and ensures that each
+individual service can be instantiated and tested in isolation without
+invoking the full application~\cite{martin2008clean}.
+ 
+\subsubsection{Centralised Configuration — \texttt{configs.py}}
+ 
+All runtime parameters — serial port identifiers, baud rates, model
+file paths, WebSocket endpoint URLs, inference thresholds, camera
+resolution, and failsafe timeouts — are defined as typed constants in
+\texttt{configs.py}. No magic numbers or hard-coded paths appear
+elsewhere in the codebase; every module imports the values it needs
+from this single file.
+ 
+Centralised configuration serves two purposes. First, it provides a
+single location to change when the system is deployed to different
+hardware or a different network environment, reducing the risk of
+inconsistent values scattered across multiple files~\cite{martin2008clean}.
+Second, it makes the system's tunable parameters immediately visible
+to anyone reading the code, without having to search through
+individual modules. Sensitive values that vary between deployments
+(Wi-Fi credentials, remote server addresses) are stored in
+\texttt{config/wifi\_credentials.json}, which is generated at runtime
+and excluded from version control via \texttt{.gitignore}.
+ 
+\subsubsection{Hardware Layer — \texttt{hardware/}}
+ 
+The \texttt{hardware/} directory contains two modules that implement
+the Hardware Layer described in Section~\ref{sec:software}.
+ 
+\texttt{arduino.py} wraps the \texttt{pyserial} library~\cite{pyserial}
+to provide a high-level interface for sending commands to and
+receiving responses from the Arduino over UART. It encapsulates
+connection management (opening and closing the serial port), command
+serialisation (encoding strings with a newline terminator), and
+response parsing (reading until a newline and decoding the response
+type). The rest of the codebase never interacts with \texttt{pyserial}
+directly — all serial I/O flows through this wrapper, ensuring that
+the underlying library can be swapped or mocked for testing without
+modifying any other module~\cite{gamma1994design}.
+ 
+\texttt{motors.py} sits above \texttt{arduino.py} and provides
+a higher-level motor control interface. It translates semantic
+commands — such as ``move forward at 60\% speed'' — into the
+\texttt{SET\_MOTOR} command strings defined by the Arduino protocol
+(Section~\ref{sec:serial_protocol}), and delegates their transmission
+to \texttt{arduino.py}. This two-level abstraction mirrors the
+Actuator Abstraction / Hardware Abstraction split in the Arduino
+firmware: \texttt{motors.py} handles logical motor semantics while
+\texttt{arduino.py} handles physical serial communication.
+ 
+\subsubsection{State Machine — \texttt{states/state\_machine.py}}
+ 
+The \texttt{state\_machine.py} module defines the \texttt{RobotState}
+enumeration and the \texttt{StateMachine} class that governs system
+behaviour. \texttt{RobotState} enumerates the seven system states
+described in Section~\ref{sec:fsm}: \texttt{BOOTING},
+\texttt{CHECKING}, \texttt{READY}, \texttt{STREAMING},
+\texttt{DETECTING}, \texttt{ACTUATING}, and \texttt{ERROR}.
+The \texttt{StateMachine} class maintains the current state, enforces
+that only valid transitions are applied, and notifies registered
+listeners when a transition occurs~\cite{hopcroft2006automata}.
+ 
+Using a Python \texttt{Enum} for state values — rather than plain
+string constants — means that an invalid state name produces an
+\texttt{AttributeError} at the point of use rather than silently
+propagating a typo through the system~\cite{martin2008clean}.
+ 
+\subsubsection{Services Layer — \texttt{services/}}
+ 
+The \texttt{services/} directory contains eight service modules, each
+implementing one of the concurrent service threads described in
+Section~\ref{sec:software}. Their roles are summarised in
+Table~\ref{tab:services}.
+ 
+\begin{table}[h]
+\centering
+\caption{Service modules and their responsibilities.}
+\label{tab:services}
+\begin{tabular}{p{4cm} p{8cm}}
+\hline
+\textbf{Module} & \textbf{Responsibility} \\
+\hline
+\texttt{asset\_manager.py}   & Verifies that model files exist in \texttt{models/}; downloads them from a remote URL if absent or corrupted. \\
+\texttt{camera\_service.py}  & Initialises the \texttt{picamera2} backend, captures frames at the configured resolution, and places them on the shared frame queue. \\
+\texttt{health\_service.py}  & Runs pre-flight checks on the camera, AI model, and Arduino serial link; reports component readiness to the FSM. \\
+\texttt{inference\_backend.py} & Provides a unified inference API used by \texttt{model\_service.py}, abstracting over local (ONNX Runtime / TFLite) and remote inference providers. \\
+\texttt{model\_service.py}   & Loads the detection model, dequeues frames from the camera, runs inference, and posts detection events to the FSM event queue. \\
+\texttt{network\_service.py} & Manages the WebSocket client connection to the backend server; sends frames and telemetry upstream; receives and dispatches commands downstream. \\
+\texttt{watchdog\_service.py} & Periodically checks that each service thread is alive and responsive; raises a fault event to the FSM if a thread becomes unresponsive. \\
+\texttt{wifi\_service.py}    & Manages Wi-Fi association at startup and, if no network is available, provisions a local hotspot for device configuration. \\
+\texttt{lifecycle\_manager.py} & Maintains a registry of cleanup callbacks; invoked by \texttt{app.py} on shutdown to tear down services in the correct order. \\
+\hline
+\end{tabular}
+\end{table}
+ 
+\noindent A key design decision common to all service modules is that
+each service receives its dependencies — shared queues, the FSM
+reference, hardware driver instances, configuration values — as
+constructor arguments rather than importing global objects directly.
+This dependency injection pattern~\cite{gamma1994design} means that
+any service can be instantiated with mock dependencies in a test
+environment without modifying the service code itself.
+ 
+\subsubsection{Utility Layer — \texttt{utils/} and \texttt{configs.py}}
+ 
+\texttt{logger.py} configures the Python standard \texttt{logging}
+module with two handlers: a rotating file handler that writes
+structured records to \texttt{logs/robot.log} and a console handler
+that mirrors output to \texttt{stdout}. All modules obtain a logger
+via \texttt{logging.getLogger(\_\_name\_\_)}, which automatically tags
+every log record with the originating module name — essential for
+tracing the source of events in a multi-threaded
+system~\cite{martin2008clean}. Log rotation prevents unbounded disk
+consumption on the Raspberry Pi's SD card during long deployments.
+ 
+\subsubsection{Asset Management — \texttt{services/asset\_manager.py}}
+ 
+The \texttt{asset\_manager.py} module addresses a practical
+deployment concern: model files (\texttt{.onnx} or \texttt{.tflite})
+are too large to store in the Git repository but are required before
+inference can begin. The Asset Manager checks for the presence and
+integrity of model files in the \texttt{models/} directory at startup.
+If a file is absent or its checksum does not match the expected value,
+the manager downloads it from a configured remote URL before the
+system proceeds to the health check phase~\cite{warden2019tinyml}.
+This eliminates the need for manual model deployment steps when
+setting up the system on new hardware.
+ 
+\bigskip
+\noindent\textbf{[DIAGRAM 1 — Project Directory Structure and
+Component Relationships]}\\
+\textit{A dependency graph showing the six component groups as nodes
+(\texttt{app.py}, \texttt{configs.py}, \texttt{hardware/},
+\texttt{states/}, \texttt{services/}, \texttt{utils/}) with directed
+arrows indicating import/dependency relationships. For example:
+\texttt{app.py} $\to$ all others; every service $\to$
+\texttt{configs.py} and \texttt{utils/logger.py};
+\texttt{model\_service.py} $\to$ \texttt{inference\_backend.py};
+\texttt{network\_service.py} $\to$ \texttt{hardware/arduino.py} via
+\texttt{motors.py}. This gives a concise visual map of the codebase
+without reproducing the full directory listing. Place after
+Table~\ref{tab:services}.}
+\bigskip
+ 
+% ============================================================
+%  Additional \bibitem entries
+% ============================================================
+%
+% \bibitem{pep517}
+% B.~Cannon et al., ``PEP 517 -- A build-system independent format
+% for source trees,''
+% \url{https://peps.python.org/pep-0517/}, 2015.
+%
+% \bibitem{pip2024}
+% PyPA, ``pip -- The Python package installer,''
+% \url{https://pip.pypa.io/}, 2024.
+%
+% \bibitem{pyserial}
+% C.~Liechti, ``pyserial -- Python serial port access library,''
+% \url{https://pyserial.readthedocs.io/}, 2020.
+%
+% (All other entries already listed in previous sections.)
