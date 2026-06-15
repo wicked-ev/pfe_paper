@@ -629,7 +629,7 @@ constructs: the \texttt{RobotState} enumeration, the
 \texttt{StateTransition} dataclass, and the \texttt{StateMachine}
 manager class. Together they provide a single, thread-safe authority
 on what the robot is doing and what it is permitted to do at any given
-moment~\cite{hopcroft2006automata}.
+moment \cite{hopcroft2006automata}.
  
 \subsubsection{State Definitions — \texttt{RobotState}}
  
@@ -637,7 +637,7 @@ Operational states are defined as a Python \texttt{Enum} rather than
 plain string constants. Using an enumeration means that an invalid
 state name raises an \texttt{AttributeError} at the call site rather
 than silently propagating a typo into the transition
-logic~\cite{martin2008clean}. The twelve states cover the full robot
+logic \cite{martin2008clean}. The twelve states cover the full robot
 lifecycle:
  
 \begin{itemize}
@@ -679,7 +679,7 @@ logs a warning and returns \texttt{False}, leaving the current state
 unchanged. This \emph{guard-and-reject} pattern ensures that no
 component can drive the robot into an illegal state, regardless of
 the order in which concurrent threads fire
-events~\cite{hopcroft2006automata}.
+events \cite{hopcroft2006automata}.
  
 On a successful transition, \texttt{transition\_to()} creates a
 \texttt{StateTransition} dataclass instance recording the source
@@ -709,7 +709,7 @@ threads: the main application loop, the watchdog, network callbacks,
 and individual service threads. All reads and writes of the internal
 state variable are protected by a \texttt{threading.Lock}
 (\texttt{self.\_state\_lock}), which serialises access and prevents
-race conditions~\cite{silberschatz2018os}. Callbacks are invoked
+race conditions \cite{silberschatz2018os}. Callbacks are invoked
 \emph{after} the lock is released so that a callback which itself
 calls \texttt{get\_current\_state()} does not deadlock. Any exception
 raised inside a callback is caught and logged; a buggy listener cannot

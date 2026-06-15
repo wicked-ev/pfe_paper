@@ -1,3 +1,5 @@
+
+
 \chapter{Theoretical Background}
 
 \section{Introduction}
@@ -13,37 +15,59 @@ Computer vision is a subfield of artificial intelligence that enables machines t
 
 Object detection is the computer-vision task of simultaneously
 \emph{classifying} and \emph{localising} one or more objects within an
-image \cite{zou2023object}. Its output is typically a set of bounding
+image \cite{zou2023object}  . Its output is typically a set of bounding
 boxes, each paired with a class label and a confidence score.
 
 Modern detectors are broadly divided into two families:
- 
+
+
+
 \begin{itemize}
-    \item \textbf{Two-stage detectors} (e.g., Faster R-CNN) first
-          generate region proposals and then classify each
-          proposal~\cite{ren2015faster}. They tend to be highly
-          accurate but computationally expensive.
- 
-    \item \textbf{Single-stage detectors} (e.g., YOLO, SSD) predict
-          boxes and classes in a single forward pass~\cite{redmon2016yolo},
-          making them well-suited for real-time and embedded
-          applications.
+	\item \textbf{Two-stage detectors} (e.g., Faster R-CNN) first
+	generate region proposals and then classify each
+	proposal~\cite{ren2015faster}. They tend to be highly
+	accurate but computationally expensive.
+	
+	\item \textbf{Single-stage detectors} (e.g., YOLO, SSD) predict
+	boxes and classes in a single forward pass~\cite{redmon2016yolo},
+	making them well-suited for real-time and embedded
+	applications.
 \end{itemize}
- 
- \begin{figure}[H]
- 	\centering
- 	% Scaled to fit perfectly within standard page margins
- 	\includegraphics[width=\textwidth]{figures/2ST.png} 
- 	\caption{(a) Two-stage Faster R-CNN with an intermediary region proposal generator. (b) One-stage RetinaNet, which consists of a dense detection pipeline.}
- 	\label{fig:detection_architectures}
- \end{figure}
- 
- 
+
+
+
+\begin{figure}[htbp]
+	\centering
+	% Left Subfigure (a)
+	\begin{minipage}[b]{0.48\textwidth}
+		\centering
+		\includegraphics[width=\textwidth]{figures/2st_right.png} % change to your actual filename
+		\caption{(a) Two-stage Faster R-CNN}
+		\label{fig:faster_rcnn}
+	\end{minipage}
+	\hfill % Maximizes horizontal separation within the normal margins
+	% Right Subfigure (b)
+	\begin{minipage}[b]{0.48\textwidth}
+		\centering
+		\includegraphics[width=\textwidth]{figures/2st_left.png} % change to your actual filename
+		\caption{(b) One-stage RetinaNet}
+		\label{fig:retinanet}
+	\end{minipage}
+	
+	\vskip 10pt
+	\caption{Figure 2.1: (a) Two-stage Faster R-CNN with an intermediary region proposal generator. (b) One-stage RetinaNet, which consists of a dense detection pipeline.}
+	\label{fig:detection_comparison}
+\end{figure}
+
+
+
 Performance is typically measured with \emph{mean Average Precision}
 (mAP), which summarises precision–recall trade-offs across all classes
-and Intersection-over-Union (IoU) thresholds~\cite{everingham2010pascal}.
+and Intersection-over-Union (IoU) thresholds \cite{everingham2010pascal}.
 
- 
+
+
+
 % ------------------------------------------------------------
 \section{Convolutional Neural Networks}
 % ------------------------------------------------------------
@@ -66,7 +90,7 @@ images~\cite{lecun1998gradient}. Three operations form its core:
  \begin{figure}[H]
  	\centering
  	% Scaled to \textwidth to guarantee full legibility of layer annotations and kernel operations
- 	\includegraphics[width=\textwidth]{figures/convolutional-neural-networks-cnns.png} 
+ 	\includegraphics[width=0.8\textwidth]{figures/convolutional-neural-networks-cnns.png} 
  	\caption{The Architectural pipeline of a deep CNN. It shows the sequential feature extraction through alternating convolution and pooling layers followed by the flattened vector feeding into a fully connected layer and producing probabilistic softmax classification.}
  	\label{fig:cnn_architecture_pipeline}
  \end{figure}

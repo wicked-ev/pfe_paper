@@ -1,4 +1,4 @@
-\part{\part{\documentclass[12pt]{report}   % or book / your university template
+\documentclass[12pt]{report}   % or book / your university template
 \usepackage[margin=2.5cm]{geometry}
 \usepackage{graphicx}
 \usepackage{xcolor}
@@ -97,12 +97,11 @@
 \include{chapters/06-conclusion}
 
 % ---- Bibliography ----
-\bibliographystyle{plainnat}
-\bibliography{bib1}
+\bibliographystyle{plain}
+\bibliography{bib1}  % Ensure your file is named exactly bib1.bib
 
 % ---- Appendix ----
 \appendix
 \include{appendix/appendix-a}
 
 \end{document}
-}
