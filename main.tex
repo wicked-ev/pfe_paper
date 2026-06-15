@@ -1,9 +1,10 @@
-\documentclass[12pt]{report}   % or book / your university template
+\part{\part{\documentclass[12pt]{report}   % or book / your university template
 \usepackage[margin=2.5cm]{geometry}
 \usepackage{graphicx}
 \usepackage{xcolor}
 \usepackage{setspace}
 \usepackage{titling}
+\usepackage{extarrows}
 \usepackage{ragged2e}
 \usepackage{tikz}
 \usepackage{pgfplots}
@@ -95,11 +96,12 @@
 \include{chapters/06-conclusion}
 
 % ---- Bibliography ----
-\bibliographystyle{plain}
-\bibliography{bib1,sample}
+\bibliographystyle{plainnat}
+\bibliography{bib1}
 
 % ---- Appendix ----
 \appendix
 \include{appendix/appendix-a}
 
 \end{document}
+}
