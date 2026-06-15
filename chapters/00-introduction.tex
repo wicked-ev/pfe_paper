@@ -581,7 +581,7 @@ To answer this question we must address a series of sub-questions:
     
     \item To what extent is the previously developed detection model suitable for practical deployment within an integrated agricultural system?
     
-    \item How can the proposed software architecture support future development and integration of additional system components?
+    \item How can the proposed software architecture support future development and integration of additional system components ?
     \item What system architecture enables seamless integration of computer vision, and spraying control?
     
     \item What safety, fault-tolerance, and redundancy mechanisms are required to ensure reliable operation?
@@ -615,3 +615,131 @@ The technical objectives include:
 \end{itemize}
 
 \noindent These objectives aim to bridge the gap between a standalone AI detection model and a more integrated agricultural system while providing a framework that can support future research and development efforts.
+
+
+% ............................................................
+\subsection{State Machine Implementation}
+\label{sec:fsm_impl}
+% ............................................................
+ 
+The Finite State Machine described architecturally in
+Section~\ref{sec:fsm} is implemented in
+\texttt{states/state\_machine.py} and comprises three tightly coupled
+constructs: the \texttt{RobotState} enumeration, the
+\texttt{StateTransition} dataclass, and the \texttt{StateMachine}
+manager class. Together they provide a single, thread-safe authority
+on what the robot is doing and what it is permitted to do at any given
+moment~\cite{hopcroft2006automata}.
+ 
+\subsubsection{State Definitions — \texttt{RobotState}}
+ 
+Operational states are defined as a Python \texttt{Enum} rather than
+plain string constants. Using an enumeration means that an invalid
+state name raises an \texttt{AttributeError} at the call site rather
+than silently propagating a typo into the transition
+logic~\cite{martin2008clean}. The twelve states cover the full robot
+lifecycle:
+ 
+\begin{itemize}
+    \item \textbf{Startup path:} \texttt{BOOTING} $\to$
+          \texttt{WIFI\_CONNECTING} $\to$ \texttt{SERVER\_CONNECTING}
+          $\to$ \texttt{CHECKING\_SYSTEMS} $\to$ \texttt{READY}.
+    \item \textbf{Provisioning path:} \texttt{HOTSPOT\_MODE} $\to$
+          \texttt{PROVISIONING} $\to$ \texttt{WIFI\_CONNECTING}
+          (entered when no known network is available).
+    \item \textbf{Operational states:} \texttt{REMOTE\_CONTROL},
+          \texttt{AUTONOMOUS}, \texttt{DETECTING} (entered from
+          \texttt{READY} once the system is fully initialised).
+    \item \textbf{Fault and terminal states:} \texttt{ERROR} (with
+          recovery paths back to \texttt{WIFI\_CONNECTING} or
+          \texttt{CHECKING\_SYSTEMS}) and \texttt{SHUTDOWN}
+          (terminal — no outgoing transitions).
+\end{itemize}
+ 
+\bigskip
+\noindent\textbf{[DIAGRAM 1 — FSM State Transition Graph]}\\
+\textit{A UML state diagram with all twelve states as rounded
+rectangles. Use the Mermaid graph provided in the project
+documentation as the authoritative source for transition arrows. Group
+the startup path, provisioning path, operational states, and fault
+states visually (e.g., using dashed boundary boxes or colour coding).
+Mark \texttt{SHUTDOWN} as a terminal state with a filled circle. This
+is the most important diagram in this subsection — place immediately
+after this list.}
+\bigskip
+ 
+\subsubsection{Transition Validation}
+ 
+The \texttt{StateMachine} class stores a
+\texttt{VALID\_TRANSITIONS} dictionary that maps every source state to
+the list of states reachable from it. Every call to
+\texttt{transition\_to()} consults this graph before applying any
+change: if the requested target is not in the allowed list, the method
+logs a warning and returns \texttt{False}, leaving the current state
+unchanged. This \emph{guard-and-reject} pattern ensures that no
+component can drive the robot into an illegal state, regardless of
+the order in which concurrent threads fire
+events~\cite{hopcroft2006automata}.
+ 
+On a successful transition, \texttt{transition\_to()} creates a
+\texttt{StateTransition} dataclass instance recording the source
+state, target state, reason string, timestamp, and an optional error
+message. This record is appended to a capped history buffer
+(default size: 100 entries) and all registered callbacks are invoked
+outside the lock to prevent deadlocks. The method returns \texttt{True}
+to the caller, which checks the return value before proceeding:
+ 
+\begin{lstlisting}[language=Python,
+                   caption={Guarded state transition in \texttt{app.py}.},
+                   label={lst:transition}]
+if not self.state_machine.transition_to(
+    RobotState.READY,
+    reason="All systems operational"
+):
+    
+    self._rollback_startup()
+    return False
+\end{lstlisting}
+ 
+% logger.error("Failed to enter READY – aborting startup") %
+\subsubsection{Thread Safety}
+ 
+The \texttt{StateMachine} class is accessed concurrently by multiple
+threads: the main application loop, the watchdog, network callbacks,
+and individual service threads. All reads and writes of the internal
+state variable are protected by a \texttt{threading.Lock}
+(\texttt{self.\_state\_lock}), which serialises access and prevents
+race conditions~\cite{silberschatz2018os}. Callbacks are invoked
+\emph{after} the lock is released so that a callback which itself
+calls \texttt{get\_current\_state()} does not deadlock. Any exception
+raised inside a callback is caught and logged; a buggy listener cannot
+crash or stall the state machine.
+ 
+\subsubsection{Public API and Usage Patterns}
+ 
+The \texttt{StateMachine} exposes a minimal interface designed around
+the principle that components should query system state rather than
+track it themselves. Three query methods are particularly widely used:
+ 
+\begin{itemize}
+    \item \texttt{get\_current\_state()} — returns the current
+          \texttt{RobotState}; used anywhere a component needs to
+          branch on system status.
+    \item \texttt{is\_ready()} — returns \texttt{True} when the
+          state is \texttt{READY}, \texttt{REMOTE\_CONTROL}, or
+          \texttt{AUTONOMOUS}; used as a gate before starting
+          non-critical services.
+    \item \texttt{can\_move()} — returns \texttt{True} in
+          \texttt{REMOTE\_CONTROL}, \texttt{AUTONOMOUS}, or
+          \texttt{DETECTING}; checked by the motor controller before
+          accepting any movement command.
+\end{itemize}
+ 
+The callback registration mechanism (\texttt{register\_state\_change\_callback})
+allows services to react to transitions without polling. For example,
+the health service registers a callback that starts periodic checks
+when the system enters \texttt{READY}, and the watchdog registers one
+that initiates shutdown when \texttt{ERROR} is reached. This
+event-driven coupling keeps services decoupled from one
+another — they respond to FSM events without holding direct references
+to each other~\cite{gamma1994design}.

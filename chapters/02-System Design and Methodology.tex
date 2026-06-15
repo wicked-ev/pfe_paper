@@ -851,16 +851,16 @@ reliability, and message semantics — while the Raspberry Pi
 translates between them, insulating network logic from hardware
 control logic and vice versa~\cite{tanenbaum2021networks}.
  
-\bigskip
-\noindent\textbf{[DIAGRAM 1 — Communication Architecture Overview]}\\
-\textit{A three-node horizontal diagram: Server (left)
-$\xleftrightarrow{\text{WebSocket / TCP}}$ Raspberry Pi (centre)
-$\xleftrightarrow{\text{UART / USB}}$ Arduino (right). Annotate each
-arrow with message categories: outbound from Pi to server (state,
-telemetry, detections), inbound from server to Pi (commands), outbound
-from Pi to Arduino (actuator commands), inbound from Arduino to Pi
-(ACKs, status). Place after this introduction paragraph.}
-\bigskip
+% \bigskip
+% \noindent\textbf{[DIAGRAM 1 — Communication Architecture Overview]}\\
+% \textit{A three-node horizontal diagram: Server (left)
+% $\xleftrightarrow{\text{WebSocket / TCP}}$ Raspberry Pi (centre)
+% $\xleftrightarrow{\text{UART / USB}}$ Arduino (right). Annotate each
+% arrow with message categories: outbound from Pi to server (state,
+% telemetry, detections), inbound from server to Pi (commands), outbound
+% from Pi to Arduino (actuator commands), inbound from Arduino to Pi
+% (ACKs, status). Place after this introduction paragraph.}
+% \bigskip
  
 % ............................................................
 \subsection{Server-to-Raspberry Pi Communication — WebSocket}
