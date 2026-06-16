@@ -1186,3 +1186,1072 @@ Table~\ref{tab:services}.}
 % \url{https://pyserial.readthedocs.io/}, 2020.
 %
 % (All other entries already listed in previous sections.)
+
+
+% ............................................................
+\subsection{State Machine Implementation}
+\label{sec:fsm_impl}
+% ............................................................
+ 
+The Finite State Machine described architecturally in
+Section~\ref{sec:fsm} is implemented in
+\texttt{states/state\_machine.py} and comprises three tightly coupled
+constructs: the \texttt{RobotState} enumeration, the
+\texttt{StateTransition} dataclass, and the \texttt{StateMachine}
+manager class. Together they provide a single, thread-safe authority
+on what the robot is doing and what it is permitted to do at any given
+moment~\cite{hopcroft2006automata}.
+ 
+\subsubsection{State Definitions — \texttt{RobotState}}
+ 
+Operational states are defined as a Python \texttt{Enum} rather than
+plain string constants. Using an enumeration means that an invalid
+state name raises an \texttt{AttributeError} at the call site rather
+than silently propagating a typo into the transition
+logic~\cite{martin2008clean}. The twelve states cover the full robot
+lifecycle:
+ 
+\begin{itemize}
+    \item \textbf{Startup path:} \texttt{BOOTING} $\to$
+          \texttt{WIFI\_CONNECTING} $\to$ \texttt{SERVER\_CONNECTING}
+          $\to$ \texttt{CHECKING\_SYSTEMS} $\to$ \texttt{READY}.
+    \item \textbf{Provisioning path:} \texttt{HOTSPOT\_MODE} $\to$
+          \texttt{PROVISIONING} $\to$ \texttt{WIFI\_CONNECTING}
+          (entered when no known network is available).
+    \item \textbf{Operational states:} \texttt{REMOTE\_CONTROL},
+          \texttt{AUTONOMOUS}, \texttt{DETECTING} (entered from
+          \texttt{READY} once the system is fully initialised).
+    \item \textbf{Fault and terminal states:} \texttt{ERROR} (with
+          recovery paths back to \texttt{WIFI\_CONNECTING} or
+          \texttt{CHECKING\_SYSTEMS}) and \texttt{SHUTDOWN}
+          (terminal — no outgoing transitions).
+\end{itemize}
+ 
+\bigskip
+\noindent\textbf{[DIAGRAM 1 — FSM State Transition Graph]}\\
+\textit{A UML state diagram with all twelve states as rounded
+rectangles. Use the Mermaid graph provided in the project
+documentation as the authoritative source for transition arrows. Group
+the startup path, provisioning path, operational states, and fault
+states visually (e.g., using dashed boundary boxes or colour coding).
+Mark \texttt{SHUTDOWN} as a terminal state with a filled circle. This
+is the most important diagram in this subsection — place immediately
+after this list.}
+\bigskip
+ 
+\subsubsection{Transition Validation}
+ 
+The \texttt{StateMachine} class stores a
+\texttt{VALID\_TRANSITIONS} dictionary that maps every source state to
+the list of states reachable from it. Every call to
+\texttt{transition\_to()} consults this graph before applying any
+change: if the requested target is not in the allowed list, the method
+logs a warning and returns \texttt{False}, leaving the current state
+unchanged. This \emph{guard-and-reject} pattern ensures that no
+component can drive the robot into an illegal state, regardless of
+the order in which concurrent threads fire
+events~\cite{hopcroft2006automata}.
+ 
+On a successful transition, \texttt{transition\_to()} creates a
+\texttt{StateTransition} dataclass instance recording the source
+state, target state, reason string, timestamp, and an optional error
+message. This record is appended to a capped history buffer
+(default size: 100 entries) and all registered callbacks are invoked
+outside the lock to prevent deadlocks. The method returns \texttt{True}
+to the caller, which checks the return value before proceeding:
+ 
+\begin{lstlisting}[language=Python,
+                   caption={Guarded state transition in \texttt{app.py}.},
+                   label={lst:transition}]
+if not self.state_machine.transition_to(
+    RobotState.READY,
+    reason="All systems operational"
+):
+    
+    self._rollback_startup()
+    return False
+\end{lstlisting}
+ 
+% logger.error("Failed to enter READY – aborting startup") %
+\subsubsection{Thread Safety}
+ 
+The \texttt{StateMachine} class is accessed concurrently by multiple
+threads: the main application loop, the watchdog, network callbacks,
+and individual service threads. All reads and writes of the internal
+state variable are protected by a \texttt{threading.Lock}
+(\texttt{self.\_state\_lock}), which serialises access and prevents
+race conditions~\cite{silberschatz2018os}. Callbacks are invoked
+\emph{after} the lock is released so that a callback which itself
+calls \texttt{get\_current\_state()} does not deadlock. Any exception
+raised inside a callback is caught and logged; a buggy listener cannot
+crash or stall the state machine.
+ 
+\subsubsection{Public API and Usage Patterns}
+ 
+The \texttt{StateMachine} exposes a minimal interface designed around
+the principle that components should query system state rather than
+track it themselves. Three query methods are particularly widely used:
+ 
+\begin{itemize}
+    \item \texttt{get\_current\_state()} — returns the current
+          \texttt{RobotState}; used anywhere a component needs to
+          branch on system status.
+    \item \texttt{is\_ready()} — returns \texttt{True} when the
+          state is \texttt{READY}, \texttt{REMOTE\_CONTROL}, or
+          \texttt{AUTONOMOUS}; used as a gate before starting
+          non-critical services.
+    \item \texttt{can\_move()} — returns \texttt{True} in
+          \texttt{REMOTE\_CONTROL}, \texttt{AUTONOMOUS}, or
+          \texttt{DETECTING}; checked by the motor controller before
+          accepting any movement command.
+\end{itemize}
+ 
+The callback registration mechanism (\texttt{register\_state\_change\_callback})
+allows services to react to transitions without polling. For example,
+the health service registers a callback that starts periodic checks
+when the system enters \texttt{READY}, and the watchdog registers one
+that initiates shutdown when \texttt{ERROR} is reached. This
+event-driven coupling keeps services decoupled from one
+another — they respond to FSM events without holding direct references
+to each other~\cite{gamma1994design}.
+
+% ............................................................
+\subsection{Service Layer Implementation}
+\label{sec:service_layer}
+% ............................................................
+ 
+The Services Layer forms the operational core of the Raspberry Pi
+software stack. Each service encapsulates a single system concern —
+image acquisition, AI inference, network communication, or health
+monitoring — and runs in its own thread, interacting with other
+services only through shared queues, the FSM event interface, or
+explicit method calls on injected dependencies. This section documents
+the implementation of each service in turn, beginning with the camera
+subsystem. A recurring theme across all services is the use of
+\emph{pluggable backend hierarchies} and \emph{fallback chains} that
+allow the system to degrade gracefully when a preferred implementation
+is unavailable — a design choice motivated directly by the runtime
+compatibility challenges described in Section~\ref{sec:dep_challenges}.
+ 
+% ............................................................
+\subsubsection{Camera Service — \texttt{services/camera\_service.py}}
+\label{sec:camera_service}
+% ............................................................
+ 
+The Camera Service is responsible for one task: continuously acquiring
+frames from the camera hardware and making the most recent frame
+available to other services with minimal latency. It exposes a
+single-slot frame buffer rather than a queue, so that consumers always
+receive the \emph{newest} image rather than waiting through a backlog
+of stale frames — an important property for a real-time detection
+pipeline where processing an outdated frame is worse than briefly
+missing one~\cite{kopetz2011real}.
+ 
+\paragraph{Pluggable Backend Architecture.}
+ 
+A key design decision in the Camera Service is the separation of
+\emph{what} the service does (capture and expose frames) from
+\emph{how} it accesses the camera hardware. Camera APIs differ
+significantly across platforms: the Raspberry Pi's \texttt{picamera2}
+library uses the Linux \texttt{libcamera} stack and is not available
+outside the Pi; OpenCV's \texttt{VideoCapture} is cross-platform but
+uses a generic path that is less efficient on the Pi; and raw V4L2
+access is Linux-only. Rather than hard-coding one API, the service
+delegates all hardware interaction to a \emph{backend} class selected
+at runtime from a preference-ordered list~\cite{gamma1994design}.
+ 
+Three concrete backends are implemented, each in its own module under
+\texttt{services/camera\_backends/}:
+ 
+\begin{itemize}
+    \item \textbf{\texttt{Picamera2Backend}} — uses the
+          \texttt{picamera2} library to access the CSI-connected
+          Raspberry Pi Camera Module via the \texttt{libcamera} ISP
+          (Image Signal Processor). This is the preferred backend
+          because it provides hardware-accelerated debayering,
+          automatic exposure control, and lower CPU overhead than
+          a generic video device~\cite{picamera2023}.
+ 
+    \item \textbf{\texttt{OpenCVBackend}} — uses
+          \texttt{cv2.VideoCapture} to open any V4L2-compatible
+          camera device. Less efficient on the Pi but fully
+          cross-platform, making it suitable for development and
+          testing on a workstation without camera-specific
+          drivers~\cite{bradski2000opencv}.
+ 
+    \item \textbf{\texttt{V4L2CameraBackend}} — interfaces directly
+          with the Linux Video4Linux2 kernel API, bypassing
+          higher-level libraries entirely. Used as a last resort when
+          neither \texttt{picamera2} nor OpenCV is installed.
+\end{itemize}
+ 
+\paragraph{Backend Selection and Caching.}
+ 
+At startup, \texttt{CameraBackendFactory.select\_best\_backend()}
+iterates over the preference list \texttt{["picamera2", "opencv",
+"v4l2"]} in order. For each candidate it calls the backend's
+\texttt{is\_available()} method, which checks whether the required
+library is importable and the camera device is present. The first
+backend that reports availability is instantiated. The selected result
+is cached in \texttt{.camera\_backend\_cache.json} so that subsequent
+startups skip the iteration and load the known-good backend
+directly~\cite{gamma1994design}.
+ 
+If the cached backend fails on a later startup — for example, because
+the camera was disconnected — the factory falls back to iterating the
+preference list again and updates the cache. This two-level strategy
+avoids paying the discovery overhead on every launch without
+sacrificing resilience.
+ 
+\paragraph{Capture Loop.}
+ 
+\texttt{CameraService.start()} spawns a background \emph{capture
+thread} that runs \texttt{\_capture\_loop()} until a stop event is
+set. The loop proceeds as follows on each iteration:
+ 
+\begin{enumerate}
+    \item \textbf{Backend open.} \texttt{\_open\_backend()} attempts
+          to start the selected backend. On failure it retries with
+          exponential back-off before raising a fault event to the
+          FSM.
+ 
+    \item \textbf{Frame read.} If the backend exposes a file
+          descriptor (\texttt{fileno()}), \texttt{select.select()} is
+          used with a configurable timeout to wait for data readiness
+          without busy-polling. A longer timeout is applied on the
+          first frame to allow the camera sensor time to settle
+          exposure and white-balance~\cite{picamera2023}. Otherwise
+          \texttt{backend.read()} is called directly.
+ 
+    \item \textbf{Frame storage.} The captured frame is written into
+          \texttt{\_latest\_frame} under a \texttt{threading.Lock},
+          alongside a monotonically increasing \texttt{frame\_id} and
+          a capture timestamp. The lock ensures a consumer reading
+          \texttt{get\_latest()} never observes a partially written
+          frame~\cite{silberschatz2018os}.
+ 
+    \item \textbf{First-frame signal.} A \texttt{threading.Event} is
+          set after the first successful frame write.
+          \texttt{wait\_for\_first\_frame()} blocks on this event,
+          allowing the startup sequence to confirm the camera is
+          operational before the health check proceeds.
+\end{enumerate}
+ 
+\paragraph{Interface to Other Services.}
+ 
+The Camera Service does not perform any frame encoding or network
+transmission. It exposes two methods — \texttt{get\_latest()} and
+\texttt{get\_latest\_metadata()} — returning the current frame and
+its associated metadata (frame ID, timestamp, backend name)
+respectively. The Model Service calls \texttt{get\_latest()} on each
+inference cycle; the remote streaming path additionally JPEG-encodes
+the retrieved frame before passing it to the Network Service. Keeping
+the Camera Service unaware of both inference and networking means it
+can be developed, tested, and replaced independently of either
+downstream consumer~\cite{martin2008clean}.
+ 
+\bigskip
+\noindent\textbf{[DIAGRAM 1 — Camera Service Backend Selection and
+Capture Flow]}\\
+\textit{Two side-by-side sub-diagrams. Left: a flowchart of
+\texttt{select\_best\_backend()} iterating the preference list,
+calling \texttt{is\_available()}, branching to cache-and-return on
+success or trying the next entry on failure, and reaching an ERROR
+state if the list is exhausted. Right: the capture loop — open
+backend, select/read frame, acquire lock, write
+\texttt{\_latest\_frame} and metadata, release lock, set first-frame
+event on first iteration, repeat. Place after this subsubsection.}
+\bigskip
+
+
+% ============================================================
+%  Chapter 4 – Section 4.5.3 (continued)
+%  AI Inference Service + Health Monitoring Service
+% ============================================================
+
+% ............................................................
+\subsubsection{AI Inference Service — \texttt{services/model\_service.py}}
+\label{sec:inference_service}
+% ............................................................
+
+The AI Inference Service is responsible for loading the object
+detection model, running inference on incoming camera frames, and
+dispatching detection results to the rest of the system. Like the
+Camera Service, it abstracts hardware and runtime differences behind
+a pluggable backend factory — a design that proved essential given
+the runtime compatibility constraints documented in
+Section~\ref{sec:dep_challenges_detail}.
+
+\paragraph{Inference Backend Abstraction.}
+
+All inference backends share a common abstract interface defined in
+\texttt{services/inference\_backends/inference\_backend.py}. The
+interface exposes three methods: \texttt{is\_available()}, which
+checks that the required runtime library is importable;
+\texttt{load\_model(path)}, which initialises the interpreter or
+session from a model file; and \texttt{run(frame)}, which executes
+a single forward pass and returns a list of detections. Two concrete
+implementations are provided:
+
+\begin{itemize}
+	\item \textbf{\texttt{TFLiteBackend}} — wraps the
+	\texttt{tflite\_runtime} interpreter. Preferred for
+	on-device inference because TFLite is designed for
+	low-memory ARM deployment and its interpreter has a smaller
+	runtime footprint than ONNX Runtime~\cite{david2021tensorflow}.
+	
+	\item \textbf{\texttt{ONNXBackend}} — wraps an ONNX Runtime
+	\texttt{InferenceSession}. Preferred on the server (x86-64)
+	where ONNX Runtime wheels are readily available and the
+	full RF-DETR operator set is
+	supported~\cite{onnxruntime2023}.
+\end{itemize}
+
+\paragraph{Backend Selection and Fallback.}
+
+\texttt{InferenceBackendFactory.select\_best\_backend()} receives a
+\texttt{BackendConfig} specifying the preference order (e.g.,
+\texttt{["tflite", "onnx"]}). For each candidate it first calls
+\texttt{is\_available()}, then attempts \texttt{load\_model()} with
+the configured model path. Both checks must pass before the backend
+is accepted — a backend that installs correctly but fails to load
+the specific model (due to unsupported operators, as experienced in
+Section~\ref{sec:dep_challenges_detail}) is rejected and the next
+candidate is tried. The first successfully loaded backend is cached
+in \texttt{.backend\_cache.json} for subsequent startups.
+
+If no local backend loads successfully, the service does not raise an
+error immediately. Instead, \texttt{model\_service.is\_streaming()}
+returns \texttt{False}, which \texttt{app.py} detects during startup
+and uses as the trigger to activate the remote streaming fallback
+path~\cite{warden2019tinyml}.
+
+\paragraph{Streaming Modes.}
+
+The Model Service supports two mutually exclusive inference modes,
+reflecting the dual-path architecture described in
+Section~\ref{sec:inference_pipeline}:
+
+\begin{itemize}
+	\item \textbf{Local streaming.} \texttt{start\_streaming()}
+	launches a dedicated inference thread. On each iteration
+	the thread calls \texttt{CameraService.get\_latest()} to
+	retrieve the newest frame, passes it through
+	\texttt{backend.run()}, enriches the raw detections with
+	a timestamp and inference latency measurement, and
+	dispatches the result to all registered detection listeners.
+	The FSM is transitioned to \texttt{DETECTING} while
+	inference is active.
+	
+	\item \textbf{Remote fallback streaming.}
+	\texttt{start\_remote\_streaming()} launches a separate
+	thread that retrieves frames from the Camera Service,
+	JPEG-encodes them using OpenCV, and pushes the compressed
+	bytes to the server via
+	\texttt{NetworkService.update\_stream\_frame()}. The server
+	executes inference and returns detection results through
+	the WebSocket messaging channel. This path trades inference
+	latency for the ability to run a model that exceeds the
+	device's local capabilities.
+\end{itemize}
+
+The JPEG encoding step in the remote path is a deliberate compression
+decision: sending raw frames over Wi-Fi at even modest resolutions
+would saturate the available bandwidth, whereas JPEG at a quality
+factor of 70--80\% reduces frame size by an order of magnitude with
+minimal impact on detection accuracy for objects of the scale
+targeted by this system~\cite{wallace1992jpeg}.
+
+\paragraph{Detection Dispatch.}
+
+Detection results — bounding boxes, class labels, and confidence
+scores — are passed to all registered listener callbacks after each
+inference cycle. This observer pattern~\cite{gamma1994design} keeps
+the Model Service decoupled from the components that act on
+detections (the FSM, the Network Service forwarding results to the
+dashboard, and the actuation pipeline). Adding a new consumer of
+detection events requires only registering a callback; no
+modification to the Model Service is needed.
+
+\bigskip
+\noindent\textbf{[DIAGRAM 2 — Inference Service Backend Selection
+	and Dual Streaming Modes]}\\
+\textit{Left: a flowchart of \texttt{select\_best\_backend()} —
+	iterate preference list, call \texttt{is\_available()}, call
+	\texttt{load\_model()}, branch to cache-and-return on success or try
+	next on failure; if list exhausted, set \texttt{is\_streaming =
+		False} and trigger remote fallback. Right: two parallel swim lanes
+	labelled ``Local Streaming'' and ``Remote Streaming'', showing the
+	frame pull from Camera Service, the inference / encode step, and the
+	output path (detection dispatch vs. NetworkService frame push). Place
+	after this subsubsection.}
+\bigskip
+
+% ............................................................
+\subsubsection{Health Monitoring Service —
+	\texttt{services/health\_service.py}}
+\label{sec:health_service}
+% ............................................................
+
+The Health Monitoring Service provides the system with a structured
+view of the operational status of its critical components. It runs
+two categories of checks: \emph{startup diagnostics}, which are
+executed once during the initialisation sequence before the system
+enters \texttt{READY}, and \emph{periodic checks}, which continue
+during normal operation to detect degraded conditions that develop
+over time.
+
+\paragraph{Health Checks.}
+
+Each check is an independent, callable unit that probes one system
+component and returns a \texttt{HealthCheckResult} dataclass
+containing the component name, a status code, a human-readable
+message, and the time taken to complete the check. Four checks are
+defined:
+
+\begin{itemize}
+	\item \textbf{Arduino connection} (\texttt{check\_arduino\_connection}).
+	Sends a \texttt{PING} command over the serial link and
+	verifies that the response is \texttt{PONG} within a
+	timeout window. This confirms that the USB connection is
+	active, the Arduino firmware is running, and the serial
+	driver on the Pi is functional.
+	
+	\item \textbf{Motor health} (\texttt{check\_motors}).
+	Sends a \texttt{CHECK} command and verifies the
+	\texttt{MOTORS\_OK} response, confirming that the Arduino's
+	motor controller is initialised and ready to accept
+	actuation commands.
+	
+	\item \textbf{Camera availability} (\texttt{check\_camera}).
+	Calls the injected \texttt{camera\_available\_fn} callable
+	— normally \texttt{CameraService.is\_available()} — to
+	confirm that the camera backend is open and has produced
+	at least one frame. Using an injected callable rather than
+	a direct reference to \texttt{CameraService} means the
+	health check can be run in isolation with a mock function
+	during testing~\cite{gamma1994design}.
+	
+	\item \textbf{AI model health} (\texttt{check\_ai\_model}).
+	Calls the injected \texttt{model\_load\_fn} to attempt
+	loading the inference backend. A failure here triggers the
+	remote streaming fallback rather than an outright error,
+	because the system can still operate — with reduced
+	autonomy — without local inference capability.
+\end{itemize}
+
+\paragraph{Status Aggregation.}
+
+Each \texttt{HealthCheckResult} carries one of four status values:
+\texttt{OK}, \texttt{WARNING}, \texttt{ERROR}, or \texttt{SKIPPED}.
+Results are stored in a dictionary keyed by component name.
+\texttt{is\_all\_healthy()} returns \texttt{True} only if no result
+carries an \texttt{ERROR} status; \texttt{get\_overall\_status()}
+returns the highest-severity status across all results. This
+distinction matters: a \texttt{WARNING} (for example, a slow model
+load) does not block the startup sequence, whereas an \texttt{ERROR}
+on the camera check causes an FSM transition to \texttt{ERROR} and
+halts initialisation~\cite{kopetz2011real}.
+
+\paragraph{Integration with the Startup Sequence.}
+
+\texttt{app.py} calls the health service after the Camera Service
+has confirmed its first frame and before the Model Service attempts
+to load its backend. This ordering ensures that each check has a
+meaningful subject to probe: the camera check requires the capture
+thread to be running, and the model check requires the asset manager
+to have verified model file availability. The result of the health
+check phase determines which FSM state the system enters next:
+
+\begin{itemize}
+	\item All checks \texttt{OK} $\to$ \texttt{READY}.
+	\item Camera or Arduino \texttt{ERROR} $\to$ \texttt{ERROR}
+	(startup aborted).
+	\item Model \texttt{ERROR} only $\to$ remote streaming activated,
+	\texttt{READY} still reachable.
+\end{itemize}
+
+\paragraph{Watchdog Integration.}
+
+During normal operation the watchdog service uses the health service
+to inform recovery decisions. When the watchdog detects that a thread
+has become unresponsive, it requests a fresh health check on the
+affected component before deciding whether to attempt an in-process
+restart or escalate to a full system reboot via the FSM
+\texttt{SHUTDOWN} transition~\cite{kopetz2011real}.
+
+\bigskip
+\noindent\textbf{[DIAGRAM 3 — Health Service Check Flow and Startup
+	Integration]}\\
+\textit{A sequence diagram with four actors: \texttt{app.py},
+	\texttt{HealthService}, individual check functions (Arduino, Motor,
+	Camera, Model), and the FSM. Show \texttt{app.py} calling each check
+	in order, the check returning a \texttt{HealthCheckResult}, and
+	\texttt{app.py} evaluating \texttt{is\_all\_healthy()} before calling
+	\texttt{state\_machine.transition\_to(READY)} or
+	\texttt{transition\_to(ERROR)}. Annotate the model-error branch that
+	leads to remote streaming activation rather than ERROR. Place after
+	this subsubsection.}
+\bigskip
+
+% ============================================================
+%  Service Interaction Summary
+% ============================================================
+
+\subsubsection{Service Interaction and Fallback Summary}
+\label{sec:service_fallback}
+
+The three services described above — Camera, Inference, and Health —
+are tightly coordinated during the startup sequence but loosely
+coupled during normal operation. Table~\ref{tab:fallback} summarises
+the fallback behaviour when each service or its preferred
+implementation fails.
+
+\begin{table}[h]
+	\centering
+	\caption{Service failure modes and fallback behaviour.}
+	\label{tab:fallback}
+	\begin{tabular}{p{3.5cm} p{4cm} p{4.5cm}}
+		\hline
+		\textbf{Failure} & \textbf{Immediate Effect} & \textbf{Fallback / Resolution} \\
+		\hline
+		Camera backend unavailable (all three fail) &
+		No frames produced; first-frame event never set &
+		FSM transitions to \texttt{ERROR}; startup aborted \\
+		Preferred camera backend fails (e.g. \texttt{picamera2} missing) &
+		Factory iterates to next backend &
+		\texttt{OpenCVBackend} or \texttt{V4L2CameraBackend} used \\
+		Local inference backend fails (TFLite) &
+		\texttt{is\_streaming()} returns \texttt{False} &
+		Try \texttt{ONNXBackend}; if both fail, activate remote streaming \\
+		Both local backends fail &
+		No local inference &
+		Remote streaming activated; frames sent to server for inference \\
+		Remote streaming: server unreachable &
+		Frame push fails; detection results unavailable &
+		FSM transitions to \texttt{ERROR}; robot halted until network recovers \\
+		Health check \texttt{ERROR} (camera or Arduino) &
+		\texttt{is\_all\_healthy()} returns \texttt{False} &
+		FSM transitions to \texttt{ERROR}; startup aborted \\
+		Health check \texttt{ERROR} (model only) &
+		Model check fails &
+		Remote streaming fallback; \texttt{READY} still reachable \\
+		\hline
+	\end{tabular}
+\end{table}
+
+The consistent use of fallback chains across all three services
+reflects the broader design philosophy of the system: prefer
+graceful degradation over hard failure wherever the robot can still
+provide useful function with reduced capability, but fail fast and
+visibly when a component whose absence makes safe operation impossible
+is unavailable~\cite{kopetz2011real,martin2008clean}.
+
+% ============================================================
+%  Additional \bibitem entries
+% ============================================================
+%
+% \bibitem{wallace1992jpeg}
+% G.~K.~Wallace, ``The JPEG still picture compression standard,''
+% \textit{IEEE Transactions on Consumer Electronics},
+% vol.~38, no.~1, pp.~xviii--xxxiv, 1992.
+%
+% (All other entries already listed in previous sections.)
+
+
+
+% ============================================================
+%  Chapter 4 – Section 4.5.4
+%  Application Runtime and Lifecycle Management
+% ============================================================
+
+% ............................................................
+\subsection{Application Runtime and Lifecycle Management}
+\label{sec:lifecycle}
+% ............................................................
+
+A multi-threaded system that acquires external resources — serial
+ports, camera devices, network sockets — must release those resources
+reliably on exit, regardless of whether shutdown is triggered
+normally, by an unhandled exception, or by an external signal. Failing
+to do so can leave the Arduino in an active state, hold the camera
+device open, or prevent the WebSocket connection from closing cleanly,
+all of which require a physical power cycle to
+recover~\cite{kopetz2011real}. The application addresses this through
+a \texttt{LifecycleManager} component that decouples resource
+acquisition from resource release, and through a clearly sequenced
+startup and shutdown procedure orchestrated by the
+\texttt{RobotApplication} class in \texttt{app.py}.
+
+% ............................................................
+\subsubsection{The LifecycleManager}
+\label{sec:lifecycle_manager}
+% ............................................................
+
+The \texttt{LifecycleManager} implements a \emph{cleanup stack}: an
+ordered list of \texttt{(name, cleanup\_fn)} pairs that grows during
+startup as each subsystem registers its tear-down callback, and is
+consumed in reverse order during shutdown. The reverse-order guarantee
+is the central design property — it ensures that a service which
+depends on another is always stopped before the service it depends
+on~\cite{gamma1994design}.
+
+The implementation is deliberately minimal:
+
+\begin{lstlisting}[language=Python,
+	caption={\texttt{LifecycleManager} — registration
+		and reverse-order cleanup.},
+	label={lst:lifecycle}]
+	class LifecycleManager:
+	def __init__(self):
+	self._cleanup_stack = []
+	self._lock = threading.Lock()
+	
+	def register(self, name: str, cleanup_fn) -> None:
+	with self._lock:
+	self._cleanup_stack.append((name, cleanup_fn))
+	
+	def cleanup_all(self) -> None:
+	with self._lock:
+	stack = list(reversed(self._cleanup_stack))
+	self._cleanup_stack.clear()
+	for name, fn in stack:
+	try:
+	fn()
+	except Exception as exc:
+	logger.exception("Cleanup failed for %s: %s", name, exc)
+\end{lstlisting}
+
+Two implementation details are worth noting. First, the \texttt{Lock}
+protecting the stack guards against a race condition in which a
+service starting in a background thread registers a callback at the
+same moment that \texttt{cleanup\_all()} is
+executing~\cite{silberschatz2018os}. Second, each cleanup invocation
+is wrapped in a \texttt{try/except}: if one callback raises an
+unhandled exception, the remaining callbacks still execute. A partial
+cleanup — where only some resources are released — is safer than a
+complete halt that leaves all remaining resources open.
+
+% ............................................................
+\subsubsection{Startup Sequence}
+\label{sec:startup_seq}
+% ............................................................
+
+\texttt{RobotApplication.startup()} executes a strictly ordered
+initialisation sequence. Each step is gated on the success of the
+previous one: a failure at any point transitions the FSM to
+\texttt{ERROR} and returns \texttt{False}, aborting startup cleanly
+without entering the main loop. The sequence proceeds through five
+phases:
+
+\begin{enumerate}
+	\item \textbf{Network phase.} The Wi-Fi service attempts to
+	connect to a known network. On success the network service
+	establishes the WebSocket connection to the backend server
+	and registers \texttt{network\_service.disconnect} with the
+	lifecycle manager. On failure the system enters
+	\texttt{HOTSPOT\_MODE} and waits for provisioning before
+	retrying.
+	
+	\item \textbf{Hardware phase.} The Arduino serial connection is
+	opened and a \texttt{PING}/\texttt{PONG} handshake confirms
+	firmware readiness. \texttt{arduino.disconnect} and
+	\texttt{\_cleanup\_motors} are registered with the lifecycle
+	manager. If the Arduino is unreachable, startup aborts —
+	the system cannot actuate safely without a confirmed
+	hardware link.
+	
+	\item \textbf{Camera phase.} The Camera Service is started and
+	\texttt{wait\_for\_first\_frame()} blocks until the capture
+	thread confirms the camera is producing frames.
+	\texttt{camera\_service.stop} is registered once the first
+	frame is received.
+	
+	\item \textbf{Health check phase.} The Health Service runs all
+	four diagnostics (Section~\ref{sec:health_service}). A
+	camera or Arduino \texttt{ERROR} aborts startup; a model
+	\texttt{ERROR} activates the remote streaming fallback but
+	allows startup to continue.
+	
+	\item \textbf{Model phase.} The Model Service attempts to load a
+	local inference backend. If successful,
+	\texttt{start\_streaming()} is called and
+	\texttt{model\_service.stop\_streaming} is registered. If
+	no local backend loads, \texttt{start\_remote\_streaming()}
+	is called instead. The watchdog is then started and its
+	cleanup callback registered last — ensuring it is the
+	first to be stopped on shutdown.
+\end{enumerate}
+
+On completion of all five phases the FSM transitions to
+\texttt{READY} and \texttt{startup()} returns \texttt{True}.
+Table~\ref{tab:lifecycle_reg} lists the registration order and the
+corresponding cleanup actions.
+
+\begin{table}[h]
+	\centering
+	\caption{Lifecycle registration order and cleanup callbacks.}
+	\label{tab:lifecycle_reg}
+	\begin{tabular}{lll}
+		\hline
+		\textbf{Registration Order} & \textbf{Component} & \textbf{Cleanup Callback} \\
+		\hline
+		1 & NetworkService   & \texttt{network\_service.disconnect}  \\
+		2 & Arduino          & \texttt{arduino.disconnect}           \\
+		3 & Motors           & \texttt{\_cleanup\_motors}            \\
+		4 & CameraService    & \texttt{camera\_service.stop}         \\
+		5 & ModelService     & \texttt{model\_service.stop\_streaming} \\
+		6 & WatchdogService  & \texttt{watchdog\_service.stop}       \\
+		\hline
+		\multicolumn{3}{l}{\textit{Shutdown executes in reverse: Watchdog
+				$\to$ Model $\to$ Camera $\to$ Motors $\to$ Arduino $\to$ Network}} \\
+		\hline
+	\end{tabular}
+\end{table}
+
+% ............................................................
+\subsubsection{Main Loop}
+\label{sec:main_loop}
+% ............................................................
+
+After a successful startup, \texttt{RobotApplication.run()} enters
+the main execution loop, which runs until the internal
+\texttt{\_is\_running} flag is cleared. The loop is deliberately
+lightweight: it does not perform camera capture, inference, or network
+I/O directly — those tasks run in their own threads managed by the
+respective services. The main loop's responsibilities are:
+
+\begin{itemize}
+	\item \textbf{Event processing.} Draining the FSM event queue
+	and dispatching events (detection results, remote commands,
+	health alerts) to the appropriate handlers.
+	\item \textbf{Watchdog polling.} Checking that all monitored
+	service threads are still alive and escalating to the FSM
+	if any thread has become unresponsive.
+	\item \textbf{Remote command handling.} Processing commands
+	received from the server (movement, mode changes, shutdown
+	requests) and translating them into FSM transitions or
+	hardware commands.
+\end{itemize}
+
+Keeping the main loop thin — a dispatcher rather than a processor —
+means that a slow handler in one iteration does not delay frame
+capture or inference in the next, because those tasks are insulated
+in their own threads~\cite{silberschatz2018os}.
+
+% ............................................................
+\subsubsection{Shutdown Sequence}
+\label{sec:shutdown_seq}
+% ............................................................
+
+\texttt{RobotApplication.shutdown()} can be triggered by three
+distinct sources: a POSIX signal (\texttt{SIGINT} / \texttt{SIGTERM})
+delivered to the process, an \texttt{ERROR}$\to$\texttt{SHUTDOWN}
+FSM transition escalated by the watchdog, or a remote shutdown
+command received from the server. Regardless of trigger, the shutdown
+procedure is identical:
+
+\begin{enumerate}
+	\item \textbf{Stop flag.} \texttt{\_is\_running} is set to
+	\texttt{False}, causing the main loop to exit on its next
+	iteration.
+	\item \textbf{FSM transition.} The state machine is transitioned
+	to \texttt{SHUTDOWN}, preventing any further state changes
+	and signalling all callback listeners to cease activity.
+	\item \textbf{Motor stop.} A \texttt{STOP\_ALL} command is sent
+	to the Arduino immediately — before any service teardown
+	— to ensure physical actuators are halted as early as
+	possible in the shutdown sequence~\cite{kopetz2011real}.
+	\item \textbf{Lifecycle cleanup.} \texttt{lifecycle\_manager.cleanup\_all()}
+	is called, executing the registered callbacks in reverse
+	order: Watchdog $\to$ Model $\to$ Camera $\to$ Motors
+	$\to$ Arduino $\to$ Network.
+\end{enumerate}
+
+The explicit motor stop before \texttt{cleanup\_all()} is a safety
+measure: if the Model or Camera service cleanup were to stall —
+for example, due to a blocking thread join — the Arduino would
+already be in an idle state rather than continuing to drive motors
+during the delay.
+
+\bigskip
+\noindent\textbf{[DIAGRAM 1 — Application Lifecycle Sequence
+	Diagram]}\\
+\textit{A UML sequence diagram with five actors: \texttt{app.py},
+	\texttt{LifecycleManager}, \texttt{FSM}, individual services (grouped
+	as one actor for clarity), and \texttt{Arduino}. Show three
+	horizontal phases separated by dashed lines: \textbf{Startup}
+	(service init $\to$ register callback loop $\to$ FSM READY),
+	\textbf{Main Loop} (event dispatch $\to$ watchdog poll, repeating),
+	and \textbf{Shutdown} (stop flag $\to$ FSM SHUTDOWN $\to$ Arduino
+	STOP\_ALL $\to$ cleanup\_all reverse stack). Annotate the
+	registration arrows with the component name from
+	Table~\ref{tab:lifecycle_reg}. This is the most important diagram
+	in this subsection — place immediately after this paragraph.}
+\bigskip
+
+
+% ============================================================
+%  Chapter 4 – Section 4.6
+%  Server Implementation
+% ============================================================
+
+% ------------------------------------------------------------
+\section{Server Implementation}
+\label{sec:server}
+% ------------------------------------------------------------
+
+The backend server acts as the coordination hub between the robot and
+the operator dashboard. It is implemented in Python using
+\textbf{FastAPI}~\cite{fastapi2024}, an asynchronous web framework
+that natively supports both HTTP and WebSocket endpoints within the
+same application. The server exposes a REST API for robot registration
+and command queuing, and a persistent WebSocket channel for real-time
+bidirectional communication with the robot. All mutable runtime state
+is held in two in-memory core services that are attached to the
+FastAPI application instance at startup and accessed by route handlers
+via dependency injection.
+
+% ............................................................
+\subsection{Architecture Overview}
+\label{sec:server_arch}
+% ............................................................
+
+The server follows a three-layer structure:
+
+\begin{itemize}
+	\item \textbf{API Router} (\texttt{routers/control.py}) —
+	declares all HTTP routes and the WebSocket endpoint,
+	validates incoming payloads, and delegates business logic
+	to the core services.
+	
+	\item \textbf{Core Services} (\texttt{core/robot\_store.py},
+	\texttt{core/model\_adapters.py}) — \texttt{RobotStore}
+	maintains an in-memory registry of connected robots and
+	their status; \texttt{ModelRegistry} manages detection
+	model metadata and adapter objects.
+	
+	\item \textbf{Dependency Injection Helpers} — lightweight
+	functions (\texttt{get\_robot\_store},
+	\texttt{get\_command\_queues},
+	\texttt{get\_model\_registry}) that retrieve the shared
+	service objects from \texttt{request.app.state}, keeping
+	route function signatures clean and making unit testing
+	straightforward~\cite{gamma1994design}.
+\end{itemize}
+
+The server is stateless from the HTTP perspective: no database is
+used and all mutable state lives in the two core services. This
+simplifies deployment — the server requires no external dependencies
+beyond the Python runtime — but means that robot registrations and
+queued commands are lost on process restart.
+
+% ............................................................
+\subsection{Data Models}
+\label{sec:server_models}
+% ............................................................
+
+All request payloads are declared as Pydantic
+\texttt{BaseModel} subclasses~\cite{pydantic2024}, which provide
+automatic JSON schema validation and generate OpenAPI documentation
+without additional code. Three models are defined:
+
+\begin{itemize}
+	\item \textbf{\texttt{RegisterRobotPayload}} (\texttt{robot\_id},
+	\texttt{name}, \texttt{ip\_address}) — validates the
+	registration request and supplies the fields needed to
+	create a new \texttt{RobotStore} entry.
+	
+	\item \textbf{\texttt{RobotCommandPayload}} (\texttt{command})
+	— validates that a command string is present before it is
+	checked against the whitelist and enqueued.
+	
+	\item \textbf{\texttt{WifiPayload}} (\texttt{ssid},
+	\texttt{password}) — carries Wi-Fi credentials to a robot
+	in provisioning mode; only accepted when the robot's status
+	field equals \texttt{"provisioning"}.
+\end{itemize}
+
+% ............................................................
+\subsection{REST API}
+\label{sec:server_rest}
+% ............................................................
+
+The REST API provides endpoints for robot lifecycle management and
+model metadata retrieval. Table~\ref{tab:api_endpoints} lists all
+endpoints, their methods, and their purpose.
+
+\begin{table}[h]
+	\centering
+	\caption{Server REST API endpoints.}
+	\label{tab:api_endpoints}
+	\begin{tabular}{lp{5cm}p{5.5cm}}
+		\hline
+		\textbf{Method + Path} & \textbf{Handler} & \textbf{Description} \\
+		\hline
+		\texttt{POST /api/robots/register}
+		& \texttt{register\_robot}
+		& Creates a robot entry, initialises its command queue, returns a session token. \\
+		\texttt{GET /api/robots}
+		& \texttt{list\_robots}
+		& Returns all registered robots and their current status. \\
+		\texttt{GET /api/robots/\{id\}}
+		& \texttt{get\_robot}
+		& Returns a single robot; 404 if not found. \\
+		\texttt{POST /api/robots/\{id\}/command}
+		& \texttt{send\_command}
+		& Validates against \texttt{VALID\_COMMANDS}, enqueues, returns \texttt{queued}. \\
+		\texttt{POST /api/robots/\{id\}/wifi}
+		& \texttt{send\_wifi\_credentials}
+		& Queues Wi-Fi credentials; rejected if robot is not in provisioning mode. \\
+		\texttt{GET /api/models}
+		& \texttt{list\_models}
+		& Returns names of all registered models. \\
+		\texttt{GET /api/models/\{name\}}
+		& \texttt{get\_model}
+		& Returns model metadata (architecture, path). \\
+		\texttt{GET /api/models/\{name\}/availability}
+		& \texttt{check\_model\_availability}
+		& Reports whether the model file exists on disk and is loaded. \\
+		\hline
+	\end{tabular}
+\end{table}
+
+\paragraph{Command Validation.}
+The \texttt{send\_command} endpoint validates the incoming command
+string against a \texttt{VALID\_COMMANDS} whitelist before enqueuing
+it. Accepted commands are \texttt{start\_stream}, \texttt{stop\_stream},
+\texttt{reboot}, and \texttt{stop}. Any string outside this set is
+rejected with an HTTP 400 response. This whitelist prevents arbitrary
+strings from reaching the robot's command handler and provides a clear
+extension point: adding a new robot capability requires adding the
+command to the list on both the server and the firmware.
+
+\paragraph{Per-Robot Command Queue.}
+Each registered robot is assigned a dedicated \texttt{asyncio.Queue}
+at registration time. Commands from the HTTP endpoint are placed on
+this queue asynchronously; the WebSocket handler consumes them and
+forwards them to the robot. The queue guarantees FIFO ordering and
+allows multiple dashboard clients to submit commands concurrently
+without race conditions~\cite{tanenbaum2021networks}.
+
+% ............................................................
+\subsection{WebSocket Control Channel}
+\label{sec:server_ws}
+% ............................................................
+
+The WebSocket endpoint at \texttt{/ws/control/\{robot\_id\}} provides
+the persistent, bidirectional channel over which the robot and server
+exchange real-time data. It is the server-side counterpart of the
+\texttt{NetworkService} WebSocket client running on the Raspberry Pi
+(Section~\ref{sec:service_layer}).
+
+The endpoint manages three concurrent concerns within a single
+\texttt{async} handler:
+
+\paragraph{Command Delivery.}
+A background \texttt{asyncio} task (\texttt{send\_commands}) runs
+concurrently with the receive loop. It continuously pulls items from
+the robot's command queue and pushes them as JSON messages over the
+WebSocket. Using a background task rather than interleaving sends with
+receives ensures that a slow or empty queue does not block the
+heartbeat receive loop~\cite{fastapi2024}.
+
+\paragraph{Heartbeat and Status Updates.}
+The server expects a JSON message with \texttt{type: "heartbeat"}
+from the robot at least once every \texttt{HEARTBEAT\_TIMEOUT\_SECONDS}
+(40 seconds). The receive loop blocks on incoming messages with this
+timeout; if no message arrives within the window, the socket is
+closed and the robot is marked offline in \texttt{RobotStore}. On
+each received heartbeat, \texttt{RobotStore.update\_status()} is
+called via \texttt{asyncio.to\_thread()} to avoid blocking the
+event loop with a potentially slow in-memory
+operation~\cite{fastapi2024}.
+
+\paragraph{Disconnection Handling.}
+Both clean disconnects (\texttt{WebSocketDisconnect}) and unexpected
+errors are caught in the handler. In either case the background
+sender task is cancelled, any queued commands are discarded, and the
+robot's status is updated to offline. This ensures the \texttt{RobotStore}
+always reflects the actual connectivity state of each robot.
+
+\bigskip
+\noindent\textbf{[DIAGRAM 1 — Server WebSocket Lifecycle]}\\
+\textit{A sequence diagram with three actors: Dashboard/Client,
+	Server WebSocket Handler, and Robot (Pi). Show the three phases:
+	Connect (\texttt{accept()} + background task spawn), Normal Operation
+	(heartbeat loop on receive side; command queue drain on send side),
+	and Disconnect (task cancel + RobotStore offline update). Annotate
+	message types (\texttt{type: "heartbeat"}, JSON command frames) on
+	each arrow. Place after this subsection.}
+\bigskip
+
+% ............................................................
+\subsection{Validation and Error Handling}
+\label{sec:server_validation}
+% ............................................................
+
+Three layers of validation protect the server from invalid input:
+
+\begin{itemize}
+	\item \textbf{Schema validation.} Pydantic models reject
+	malformed or missing fields before a route handler is
+	entered, returning an HTTP 422 response automatically with
+	a structured error body~\cite{pydantic2024}.
+	
+	\item \textbf{Resource existence.} Routes that reference a
+	\texttt{robot\_id} or \texttt{model\_name} raise an
+	HTTP 404 \texttt{HTTPException} if the identifier is not
+	found in the respective store.
+	
+	\item \textbf{State-dependent logic.} The Wi-Fi credential
+	endpoint checks the robot's \texttt{status} field and
+	rejects requests when the robot is not in provisioning
+	mode, preventing credentials from being overwritten during
+	normal operation.
+\end{itemize}
+
+% ............................................................
+\subsection{Extensibility}
+\label{sec:server_ext}
+% ............................................................
+
+The server architecture was designed with future extension in mind.
+Three explicit extension points are identified:
+
+\begin{itemize}
+	\item \textbf{Authentication.} The registration and command
+	endpoints include placeholder comments for token
+	verification. Adding authentication requires implementing
+	a verification function and inserting it as a FastAPI
+	dependency on the relevant routes — no structural change
+	to the router is needed.
+	
+	\item \textbf{Model hot-loading.} The \texttt{ModelRegistry}
+	adapter pattern~\cite{gamma1994design} allows models to be
+	loaded and unloaded at runtime without restarting the
+	server or modifying the API. A new model adapter class is
+	registered once; the existing \texttt{/api/models}
+	endpoints expose it automatically.
+	
+	\item \textbf{Extended command set.} Adding a new robot
+	capability requires appending its command string to
+	\texttt{VALID\_COMMANDS} on the server and implementing
+	the corresponding handler in the Arduino firmware or
+	Raspberry Pi software. No changes to the WebSocket
+	protocol or queue mechanism are needed.
+\end{itemize}
+
+% ============================================================
+%  Additional \bibitem entries
+% ============================================================
+%
+% \bibitem{fastapi2024}
+% S.~Ramirez, ``FastAPI: Modern, fast web framework for building
+% APIs with Python,''
+% \url{https://fastapi.tiangolo.com/}, 2024.
+%
+% \bibitem{pydantic2024}
+% S.~Colvin et al., ``Pydantic: Data validation using Python type
+% hints,''
+% \url{https://docs.pydantic.dev/}, 2024.
