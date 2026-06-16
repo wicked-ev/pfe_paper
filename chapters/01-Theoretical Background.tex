@@ -1,3 +1,5 @@
+
+
 \chapter{Theoretical Background}
 
 \section{Introduction}
@@ -13,28 +15,59 @@ Computer vision is a subfield of artificial intelligence that enables machines t
 
 Object detection is the computer-vision task of simultaneously
 \emph{classifying} and \emph{localising} one or more objects within an
-image \cite{zou2023object}. Its output is typically a set of bounding
+image \cite{zou2023object}  . Its output is typically a set of bounding
 boxes, each paired with a class label and a confidence score.
 
 Modern detectors are broadly divided into two families:
- 
+
+
+
 \begin{itemize}
-    \item \textbf{Two-stage detectors} (e.g., Faster R-CNN) first
-          generate region proposals and then classify each
-          proposal~\cite{ren2015faster}. They tend to be highly
-          accurate but computationally expensive.
- 
-    \item \textbf{Single-stage detectors} (e.g., YOLO, SSD) predict
-          boxes and classes in a single forward pass~\cite{redmon2016yolo},
-          making them well-suited for real-time and embedded
-          applications.
+	\item \textbf{Two-stage detectors} (e.g., Faster R-CNN) first
+	generate region proposals and then classify each
+	proposal~\cite{ren2015faster}. They tend to be highly
+	accurate but computationally expensive.
+	
+	\item \textbf{Single-stage detectors} (e.g., YOLO, SSD) predict
+	boxes and classes in a single forward pass~\cite{redmon2016yolo},
+	making them well-suited for real-time and embedded
+	applications.
 \end{itemize}
- 
+
+
+
+\begin{figure}[htbp]
+	\centering
+	% Left Subfigure (a)
+	\begin{minipage}[b]{0.48\textwidth}
+		\centering
+		\includegraphics[width=\textwidth]{figures/2st_right.png} % change to your actual filename
+		\caption{(a) Two-stage Faster R-CNN}
+		\label{fig:faster_rcnn}
+	\end{minipage}
+	\hfill % Maximizes horizontal separation within the normal margins
+	% Right Subfigure (b)
+	\begin{minipage}[b]{0.48\textwidth}
+		\centering
+		\includegraphics[width=\textwidth]{figures/2st_left.png} % change to your actual filename
+		\caption{(b) One-stage RetinaNet}
+		\label{fig:retinanet}
+	\end{minipage}
+	
+	\vskip 10pt
+	\caption{Figure 2.1: (a) Two-stage Faster R-CNN with an intermediary region proposal generator. (b) One-stage RetinaNet, which consists of a dense detection pipeline.}
+	\label{fig:detection_comparison}
+\end{figure}
+
+
+
 Performance is typically measured with \emph{mean Average Precision}
 (mAP), which summarises precision–recall trade-offs across all classes
-and Intersection-over-Union (IoU) thresholds~\cite{everingham2010pascal}.
+and Intersection-over-Union (IoU) thresholds \cite{everingham2010pascal}.
 
- 
+
+
+
 % ------------------------------------------------------------
 \section{Convolutional Neural Networks}
 % ------------------------------------------------------------
@@ -52,6 +85,16 @@ images~\cite{lecun1998gradient}. Three operations form its core:
     \item \textbf{Fully connected layers} — aggregate extracted
           features for final classification or regression.
 \end{enumerate}
+ 
+ 
+ \begin{figure}[H]
+ 	\centering
+ 	% Scaled to \textwidth to guarantee full legibility of layer annotations and kernel operations
+ 	\includegraphics[width=0.8\textwidth]{figures/convolutional-neural-networks-cnns.png} 
+ 	\caption{The Architectural pipeline of a deep CNN. It shows the sequential feature extraction through alternating convolution and pooling layers followed by the flattened vector feeding into a fully connected layer and producing probabilistic softmax classification.}
+ 	\label{fig:cnn_architecture_pipeline}
+ \end{figure}
+ 
  
 CNNs are central to object detection because their hierarchical
 feature extraction naturally captures low-level details (edges) in
@@ -75,8 +118,9 @@ data~\cite{lecun2015deep}. Training is performed end-to-end via
 minimising a task-specific loss function over large labelled
 datasets~\cite{goodfellow2016deep}.
  
-Key factors that made deep learning dominant in computer vision are:
  
+Key factors that made deep learning dominant in computer vision are:
+
 \begin{itemize}
     \item Large annotated datasets (ImageNet, COCO).
     \item GPU-accelerated parallel computation.
@@ -91,6 +135,28 @@ Transformer (ViT)~\cite{dosovitskiy2021image} and its descendants,
 achieving state-of-the-art results by modelling long-range spatial
 dependencies via self-attention — a capability CNNs approximate only
 indirectly through stacking layers.
+
+\begin{figure}[H]
+	\centering
+	\begin{tikzpicture}[font=\sffamily\bfseries, align=center]
+		
+		% Outer Circle: Artificial Intelligence
+		\draw[thick, cyan, fill=cyan!2] (0,1.8) circle (3.2cm);
+		\node[text=black!80] at (0,4.0) {Artificial\\Intelligence};
+		
+		% Middle Circle: Machine Learning
+		\draw[thick, orange!80, fill=orange!5] (0,0.8) circle (2.2cm);
+		\node[text=black!80] at (0,1.8) {Machine\\Learning};
+		
+		% Inner Circle: Deep Learning
+		\draw[thick, green!50!black, fill=green!5] (0,0) circle (1.2cm);
+		\node[text=black!80] at (0,0) {Deep\\Learning};
+		
+	\end{tikzpicture}
+	\caption{Taxonomical taxonomy mapping the nested subsets of modern computational intelligence paradigms.}
+	\label{fig:ai_ml_dl_taxonomy}
+\end{figure}
+
 
 \subsection{RF-DETR Nano Model Overview}
 
@@ -132,20 +198,47 @@ Key characteristics of RF-DETR Nano relevant to this work:
 Table~\ref{tab:rfdetr_compare} situates RF-DETR Nano among comparable
 lightweight detectors.
  
-\begin{table}[h]
-\centering
-\caption{Comparison of lightweight object detection models.}
-\label{tab:rfdetr_compare}
-\begin{tabular}{lccc}
-\hline
-\textbf{Model} & \textbf{Params (M)} & \textbf{mAP (COCO)} & \textbf{Architecture} \\
-\hline
-YOLOv8n        & 3.2  & 37.3 & CNN            \\
-RT-DETR-R18    & 20.0 & 46.5 & Transformer    \\
-RF-DETR Nano   & 30.5   & 48.4   & ViT + DETR     \\
-\hline
-\end{tabular}
+\begin{table}[H]
+	\centering
+	\caption{Comparison of lightweight object detection models}
+	\label{tab:rfdetr_compare}
+	\small
+	\setlength{\extrarowheight}{5pt}
+	
+	% Forces the entire table to take up only 85% of the page width
+	% The !{\color{white}\vrule} syntax creates clean, modern separators instead of harsh black borders
+	\begin{tabularx}{0.85\textwidth}{
+			>{\raggedright\arraybackslash}X 
+			!{\color{white}\vrule} c 
+			!{\color{white}\vrule} c 
+			!{\color{white}\vrule} >{\raggedright\arraybackslash}X}
+		\toprule
+		\rowcolor[HTML]{2C3E50} 
+		\textcolor{white}{\textbf{Model}} & 
+		\textcolor{white}{\textbf{Params (M)}} & 
+		\textcolor{white}{\textbf{mAP (COCO)}} & 
+		\textcolor{white}{\textbf{Architecture}} \\
+		\midrule
+		
+		YOLOv8n        & 3.2  & 37.3 & CNN \\
+		
+		\rowcolor[HTML]{F2F4F4} 
+		RT-DETR-R18    & 20.0 & 46.5 & Transformer \\
+		
+		RF-DETR Nano   & --   & --   & ViT + DETR \\
+		\bottomrule
+	\end{tabularx}
 \end{table}
+
+
+\begin{figure}[H]
+	\centering
+	% Scaled to full text width to ensure text legends and directional keys are crisp and legible
+	\includegraphics[width=\textwidth]{figures/ddd.png} 
+	\caption{Architecture of the multi-scale Deformable DETR network pipeline. Left: Extraction of image feature maps across variable spatial scales. Center: The Encoder processing stack utilizing multi-scale deformable self-attention layers. Right: The Decoder structure routing object queries through multi-scale cross-attention and standard transformer self-attention mechanisms to output localized bounding box predictions.}
+	\label{fig:deformable_detr_architecture}
+\end{figure}
+
 
 \section{Model Deployment and Format Conversion for Edge Devices}
 % ------------------------------------------------------------
@@ -195,6 +288,16 @@ In the context of embedded deployment, ONNX serves as an intermediate
 step: the model is first exported to ONNX to decouple it from the
 training framework, and then either executed directly via ONNX Runtime
 or converted further into a hardware-specific format.
+ 
+ 
+ \begin{figure}[H]
+ 	\centering
+ 	% Scaled to \textwidth to guarantee absolute legibility of framework and hardware text labels
+ 	\includegraphics[width=\textwidth]{figures/0_o5doPyWdduatUKtX.png} 
+ 	\caption{The open and interoperable ecosystem of the Open Neural Network Exchange (ONNX) framework. ONNX decouples the training infrastructure (left) from heterogeneous runtime deployment targets and specialized hardware accelerators (right), standardizing graph compilation across diverse edge and cloud environments.}
+ 	\label{fig:onnx_interoperability_ecosystem}
+ \end{figure}
+ 
  
 % ............................................................
 \subsection{TensorFlow Lite}
@@ -355,19 +458,36 @@ a longer training pipeline.
 Table~\ref{tab:quant_compare} summarises the trade-offs between the
 two approaches.
  
-\begin{table}[h]
-\centering
-\caption{Comparison of quantization strategies.}
-\label{tab:quant_compare}
-\begin{tabular}{lccc}
-\hline
-\textbf{Strategy} & \textbf{Training Required} & \textbf{Accuracy} & \textbf{Effort} \\
-\hline
-Post-Training (Dynamic)  & No  & Moderate & Low    \\
-Post-Training (Static)   & No  & Good     & Low    \\
-Quantization-Aware (QAT) & Yes & Best     & High   \\
-\hline
-\end{tabular}
+\begin{table}[H]
+	\centering
+	\caption{Comparison of quantization strategies}
+	\label{tab:quant_compare}
+	\small
+	\setlength{\extrarowheight}{5pt}
+	
+	% Scaled to 0.85\textwidth to match your object detection table perfectly
+	% Uses white vertical rule separators for crisp column lanes
+	\begin{tabularx}{0.85\textwidth}{
+			>{\raggedright\arraybackslash}X 
+			!{\color{white}\vrule} c 
+			!{\color{white}\vrule} c 
+			!{\color{white}\vrule} >{\raggedright\arraybackslash}X}
+		\toprule
+		\rowcolor[HTML]{2C3E50} 
+		\textcolor{white}{\textbf{Strategy}} & 
+		\textcolor{white}{\textbf{Training Required}} & 
+		\textcolor{white}{\textbf{Accuracy}} & 
+		\textcolor{white}{\textbf{Effort}} \\
+		\midrule
+		
+		Post-Training (Dynamic)  & No  & Moderate & Low  \\
+		
+		\rowcolor[HTML]{F2F4F4} 
+		Post-Training (Static)   & No  & Good     & Low  \\
+		
+		Quantization-Aware (QAT) & Yes & Best     & High \\
+		\bottomrule
+	\end{tabularx}
 \end{table}
  
 % ------------------------------------------------------------
